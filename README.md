@@ -26,7 +26,7 @@
 ## Деплой
 
 1. Создайте **отдельный** GitHub-репозиторий из этой папки и импортируйте его в Vercel как новый проект.
-2. В Vercel Marketplace подключите **Upstash Redis** к этому проекту. Vercel добавит `UPSTASH_REDIS_REST_URL` и `UPSTASH_REDIS_REST_TOKEN` в переменные окружения.
+2. В Vercel Marketplace подключите **Upstash Redis** к этому проекту. Интеграция добавит `KV_REST_API_URL` и `KV_REST_API_TOKEN` автоматически; при прямом подключении Upstash используются `UPSTASH_REDIS_REST_URL` и `UPSTASH_REDIS_REST_TOKEN`.
 3. В Vercel → Settings → Environment Variables добавьте остальные значения из `.env.example`:
    - `TELEGRAM_BOT_TOKEN` — токен от @BotFather;
    - `TELEGRAM_WEBHOOK_SECRET` — новая случайная строка из букв, цифр, `_` и `-`;
