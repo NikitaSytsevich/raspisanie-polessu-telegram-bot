@@ -1,7 +1,8 @@
 const { safeEqual } = require('../lib/auth');
 const { tgApi, sendRichMessage, editRichMessage, answerCallbackQuery } = require('../lib/telegram');
 const { addDays, getSchedule } = require('../lib/schedule');
-const { HELP, formatDay, formatWeek, navKeyboard } = require('../lib/format');
+const { SOURCES, formatDay, navKeyboard, sourcesKeyboard } = require('../lib/format');
+const { dashboardStore } = require('../lib/dashboard-store');
 
 let username = null;
 
@@ -11,26 +12,26 @@ async function botUsername() {
   return username;
 }
 
-async function scheduleDay(date, { refresh = false } = {}) {
-  const payload = await getSchedule({ force: refresh });
-  return { payload, html: formatDay(payload, date) };
-}
-
 async function sendCommand(chatId, command) {
-  if (command === 'start' || command === 'help') return sendRichMessage(chatId, HELP, {
-    inline_keyboard: [[
-      { text: 'Сегодня', callback_data: 'd:today' },
-      { text: 'Завтра', callback_data: 'd:tomorrow' },
-      { text: 'Неделя', callback_data: 'w' },
-    ]],
-  });
+  if (command !== 'start' && command !== 'help') return null;
   const initial = await getSchedule();
-  const date = command === 'today' ? initial.today : command === 'tomorrow' ? addDays(initial.today, 1) : null;
-  if (date) return sendRichMessage(chatId, formatDay(initial, date), navKeyboard(date, initial.today));
-  if (command === 'week') return sendRichMessage(chatId, formatWeek(initial), {
-    inline_keyboard: [[{ text: 'Сегодня', callback_data: 'd:today' }, { text: 'Обновить', callback_data: 'w' }]],
-  });
-  return null;
+  const html = formatDay(initial, initial.today);
+  const replyMarkup = navKeyboard(initial.today, initial.today);
+  const store = dashboardStore();
+  const existing = await store.get(chatId);
+  if (existing) {
+    try {
+      await editRichMessage(chatId, existing.messageId, html, replyMarkup);
+      return existing;
+    } catch (error) {
+      if (/message is not modified/i.test(error.message)) return existing;
+      // Пользователь мог удалить карточку вручную. Создаём её заново и заменяем ID.
+      if (!/message to edit not found/i.test(error.message)) throw error;
+    }
+  }
+  const message = await sendRichMessage(chatId, html, replyMarkup);
+  await store.save(chatId, message.message_id);
+  return message;
 }
 
 async function handleCallback(callback) {
@@ -39,19 +40,22 @@ async function handleCallback(callback) {
   const data = String(callback.data || '');
   try {
     if (!chatId || !messageId) return;
-    if (data === 'w') {
-      const payload = await getSchedule({ force: true });
-      await editRichMessage(chatId, messageId, formatWeek(payload), {
-        inline_keyboard: [[{ text: 'Сегодня', callback_data: 'd:today' }, { text: 'Обновить', callback_data: 'w' }]],
-      });
+    const source = /^s:(\d{4}-\d{2}-\d{2}):(all|ice_arena|sports_pool|small_pool|rowing_base)$/.exec(data);
+    if (source) {
+      const payload = await getSchedule();
+      await editRichMessage(chatId, messageId, SOURCES, sourcesKeyboard(payload, source[1], source[2]));
       return;
     }
-    const match = /^(d|r):(today|tomorrow|\d{4}-\d{2}-\d{2})$/.exec(data);
-    if (!match) return;
-    const force = match[1] === 'r';
+    const dayAction = /^(d|r):(today|tomorrow|\d{4}-\d{2}-\d{2}):(all|ice_arena|sports_pool|small_pool|rowing_base)$/.exec(data);
+    const facilityAction = /^f:(all|ice_arena|sports_pool|small_pool|rowing_base):(\d{4}-\d{2}-\d{2})$/.exec(data);
+    if (!dayAction && !facilityAction) return;
+    const force = dayAction?.[1] === 'r';
     const payload = await getSchedule({ force });
-    const date = match[2] === 'today' ? payload.today : match[2] === 'tomorrow' ? addDays(payload.today, 1) : match[2];
-    await editRichMessage(chatId, messageId, formatDay(payload, date), navKeyboard(date, payload.today));
+    const rawDate = facilityAction ? facilityAction[2] : dayAction[2];
+    const rawSelected = facilityAction ? facilityAction[1] : dayAction[3];
+    const date = rawDate === 'today' ? payload.today : rawDate === 'tomorrow' ? addDays(payload.today, 1) : rawDate;
+    const selected = rawSelected === 'all' || payload.facilities.some(facility => facility.id === rawSelected) ? rawSelected : 'all';
+    await editRichMessage(chatId, messageId, formatDay(payload, date, selected), navKeyboard(date, payload.today, selected));
   } finally {
     await answerCallbackQuery(callback.id).catch(() => {});
   }
@@ -67,17 +71,16 @@ async function setup(req, res) {
     drop_pending_updates: true,
   });
   const commands = await tgApi('setMyCommands', { commands: [
-    { command: 'today', description: 'Расписание на сегодня' },
-    { command: 'tomorrow', description: 'Расписание на завтра' },
-    { command: 'week', description: 'Расписание на неделю' },
-    { command: 'help', description: 'Помощь' },
+    { command: 'start', description: 'Открыть расписание' },
   ] });
   res.status(200).json({ ok: true, webhook, commands });
 }
 
 module.exports = async (req, res) => {
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
-  if (!secret || !process.env.TELEGRAM_BOT_TOKEN) return res.status(503).json({ ok: false, error: 'not_configured' });
+  if (!secret || !process.env.TELEGRAM_BOT_TOKEN || !process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    return res.status(503).json({ ok: false, error: 'not_configured' });
+  }
   if (req.method === 'GET' && safeEqual(String(req.query?.setup || ''), secret)) {
     try { await setup(req, res); } catch (error) { res.status(500).json({ ok: false, error: error.message }); }
     return;
