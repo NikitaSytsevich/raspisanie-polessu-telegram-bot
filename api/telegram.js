@@ -4,14 +4,6 @@ const { addDays, getSchedule } = require('../lib/schedule');
 const { SOURCES, formatDay, navKeyboard, sourcesKeyboard } = require('../lib/format');
 const { dashboardStore } = require('../lib/dashboard-store');
 
-let username = null;
-
-async function botUsername() {
-  if (username) return username;
-  username = String((await tgApi('getMe', {})).username || '').toLowerCase();
-  return username;
-}
-
 async function sendCommand(chatId, command) {
   if (command !== 'start' && command !== 'help') return null;
   const initial = await getSchedule();
@@ -96,10 +88,9 @@ module.exports = async (req, res) => {
     else if (update.message?.text) {
       const match = /^\/([a-z_]+)(?:@(\w+))?(?:\s|$)/i.exec(update.message.text.trim());
       if (match) {
-        const mentioned = String(match[2] || '').toLowerCase();
-        if (!mentioned || mentioned === await botUsername()) {
-          await sendCommand(update.message.chat.id, match[1].toLowerCase());
-        }
+        // Updates адресованных другим ботам сюда не поступают, поэтому не
+        // запрашиваем getMe: это исключает лишнюю точку отказа для /start.
+        await sendCommand(update.message.chat.id, match[1].toLowerCase());
       }
     }
   } catch (error) {
