@@ -75,7 +75,8 @@ module.exports = async (req, res) => {
   if (!secret || !process.env.TELEGRAM_BOT_TOKEN || !redisUrl || !redisToken) {
     return res.status(503).json({ ok: false, error: 'not_configured' });
   }
-  if (req.method === 'GET' && safeEqual(String(req.query?.setup || ''), secret)) {
+  const setupToken = new URL(req.url || '/', `https://${req.headers?.host || 'localhost'}`).searchParams.get('setup') || '';
+  if (req.method === 'GET' && safeEqual(setupToken, secret)) {
     try { await setup(req, res); } catch (error) { res.status(500).json({ ok: false, error: error.message }); }
     return;
   }
