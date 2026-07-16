@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/telegram.js": { "maxDuration": 15, "memory": 256 },
-    "api/daily-refresh.js": { "maxDuration": 15, "memory": 256 }
-  },
-  "crons": [{ "path": "/api/daily-refresh", "schedule": "0 7 * * *" }]
+    "api/daily-refresh.js": { "maxDuration": 15, "memory": 256 },
+    "api/check-changes.js": { "maxDuration": 15, "memory": 256 }
+  }
 }
