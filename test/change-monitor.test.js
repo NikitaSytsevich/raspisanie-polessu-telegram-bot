@@ -17,3 +17,14 @@ test('change monitor ignores unstable generated time and finds only schedule cha
   assert.match(formatChangeAlert(changes), /Расписание обновлено/);
   assert.match(formatChangeAlert(changes), /➕/);
 });
+
+test('snapshot keeps the current date without treating its change as a schedule change', () => {
+  const sessions = [{ date: '2026-07-16', start: '10:00', end: '11:00', activity: '' }];
+  const previous = scheduleSnapshot({ today: '2026-07-16', facilities: [facility(sessions)] });
+  const next = scheduleSnapshot({ today: '2026-07-17', facilities: [facility(sessions)] });
+  assert.equal(previous.today, '2026-07-16');
+  assert.equal(next.today, '2026-07-17');
+  // Смена даты сама по себе не является изменением расписания: она включает
+  // утреннее обновление карточек, но не рассылку сводки об изменениях.
+  assert.deepEqual(diffSchedules(previous, next), []);
+});

@@ -35,7 +35,10 @@ module.exports = async (req, res) => {
     const changes = previous ? diffSchedules(previous, next) : [];
     await store.saveSnapshot(next);
 
-    if (!previous || changes.length) {
+    // Первая проверка нового дня обновляет карточки даже без изменений:
+    // иначе до первого нажатия кнопки они показывают вчерашнюю дату.
+    const dayChanged = !previous || previous.today !== next.today;
+    if (dayChanged || changes.length) {
       await refreshDashboards({
         store,
         html: formatDay(payload, payload.today),
@@ -44,7 +47,7 @@ module.exports = async (req, res) => {
       });
     }
     const notifications = changes.length ? await notifyDashboards(store, formatChangeAlert(changes)) : 0;
-    return res.status(200).json({ ok: true, baseline: !previous, changed: changes.length, notifications });
+    return res.status(200).json({ ok: true, baseline: !previous, dayChanged, changed: changes.length, notifications });
   } catch (error) {
     console.error('[check-changes] failed:', error.message);
     return res.status(500).json({ ok: false, error: error.message });
