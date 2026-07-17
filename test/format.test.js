@@ -10,17 +10,17 @@ const payload = {
   }],
 };
 
-test('day schedule is a Rich Message table and escapes source data', () => {
+test('day schedule uses compact session lines instead of tables and escapes source data', () => {
   const html = formatDay(payload, payload.today);
   assert.match(html, /<h3>Все объекты/);
-  assert.match(html, /<table bordered striped>/);
-  assert.match(html, /<th>Время<\/th><th>Что проходит<\/th>/);
-  assert.match(html, /Арена &amp; зал/);
+  // Таблицы Rich Messages на iOS рендерятся с наложением рядов — их быть не должно.
+  assert.doesNotMatch(html, /<table/);
+  assert.match(html, /<code>10:00–11:30<\/code>/);
   assert.match(html, /&lt;Хоккей&gt;/);
   assert.match(html, /<b><a href="https:\/\/example\.test\/\?a=1&amp;b=2">Арена &amp; зал<\/a><\/b>/);
 });
 
-test('facility filter keeps the official source link in the normal table font', () => {
+test('facility filter keeps the official source link on the facility name', () => {
   const html = formatDay(payload, payload.today, 'ice');
   assert.match(html, /Арена &amp; зал/);
   assert.match(html, /<b><a href=/);
