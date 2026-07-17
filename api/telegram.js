@@ -30,6 +30,7 @@ async function handleCallback(callback) {
   const chatId = callback.message?.chat?.id;
   const messageId = callback.message?.message_id;
   const data = String(callback.data || '');
+  let toast;
   try {
     if (!chatId || !messageId) return;
     const source = /^s:(\d{4}-\d{2}-\d{2}):(all|ice_arena|sports_pool|small_pool|rowing_base)$/.exec(data);
@@ -48,8 +49,10 @@ async function handleCallback(callback) {
     const date = rawDate === 'today' ? payload.today : rawDate === 'tomorrow' ? addDays(payload.today, 1) : rawDate;
     const selected = rawSelected === 'all' || payload.facilities.some(facility => facility.id === rawSelected) ? rawSelected : 'all';
     await editRichMessage(chatId, messageId, formatDay(payload, date, selected), navKeyboard(date, payload.today, selected));
+    // Тост подтверждаем только после успешного обновления карточки.
+    if (force) toast = 'Расписание обновлено ✓';
   } finally {
-    await answerCallbackQuery(callback.id).catch(() => {});
+    await answerCallbackQuery(callback.id, toast).catch(() => {});
   }
 }
 
@@ -65,7 +68,13 @@ async function setup(req, res) {
   const commands = await tgApi('setMyCommands', { commands: [
     { command: 'start', description: 'Открыть расписание' },
   ] });
-  res.status(200).json({ ok: true, webhook, commands });
+  const description = await tgApi('setMyDescription', {
+    description: 'Расписание спортивных объектов ПолесГУ: ледовая арена, большой и малый бассейны, гребная база. Данные загружаются с официального сайта университета, а при изменениях бот присылает сводку.',
+  });
+  const shortDescription = await tgApi('setMyShortDescription', {
+    short_description: 'Расписание спортобъектов ПолесГУ с официального сайта',
+  });
+  res.status(200).json({ ok: true, webhook, commands, description, shortDescription });
 }
 
 module.exports = async (req, res) => {
