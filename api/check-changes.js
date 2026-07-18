@@ -1,10 +1,29 @@
 const { safeEqual } = require('../lib/auth');
 const { getSchedule } = require('../lib/schedule');
-const { formatDay, navKeyboard } = require('../lib/format');
+const { formatDay, formatMorningDigest, navKeyboard } = require('../lib/format');
 const { dashboardStore } = require('../lib/dashboard-store');
 const { refreshDashboards, isRemovedDashboardError } = require('../lib/daily-refresh');
 const { scheduleSnapshot, diffSchedules, formatChangeAlert } = require('../lib/change-monitor');
-const { editRichMessage, sendRichMessage } = require('../lib/telegram');
+const { editRichMessage, sendRichMessage, deleteMessage } = require('../lib/telegram');
+
+async function sendMorningDigests(store, html) {
+  const dashboards = await store.list();
+  let sent = 0;
+  await Promise.all(dashboards.map(async dashboard => {
+    try {
+      // В чате живёт ровно одна сводка: вчерашнюю удаляем, новую шлём без звука.
+      const previousDigest = await store.getDigestMessageId(dashboard.chatId);
+      if (previousDigest) await deleteMessage(dashboard.chatId, previousDigest).catch(() => {});
+      const message = await sendRichMessage(dashboard.chatId, html, undefined, { silent: true });
+      await store.saveDigestMessageId(dashboard.chatId, message.message_id);
+      sent += 1;
+    } catch (error) {
+      if (isRemovedDashboardError(error)) await store.remove(dashboard.chatId);
+      else console.error(`[check-changes] digest ${dashboard.chatId}:`, error.message);
+    }
+  }));
+  return sent;
+}
 
 async function notifyDashboards(store, html) {
   const dashboards = await store.list();
@@ -47,7 +66,11 @@ module.exports = async (req, res) => {
       });
     }
     const notifications = changes.length ? await notifyDashboards(store, formatChangeAlert(changes)) : 0;
-    return res.status(200).json({ ok: true, baseline: !previous, dayChanged, changed: changes.length, notifications });
+    // Сводку шлём только на реальной смене дня, а не на первом запуске после
+    // настройки: иначе она пришла бы посреди дня.
+    const dayStarted = Boolean(previous?.today) && previous.today !== next.today;
+    const digests = dayStarted ? await sendMorningDigests(store, formatMorningDigest(payload)) : 0;
+    return res.status(200).json({ ok: true, baseline: !previous, dayChanged, changed: changes.length, notifications, digests });
   } catch (error) {
     console.error('[check-changes] failed:', error.message);
     return res.status(500).json({ ok: false, error: error.message });
