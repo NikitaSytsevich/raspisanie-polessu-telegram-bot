@@ -6,6 +6,12 @@ const { refreshDashboards, isRemovedDashboardError } = require('../lib/daily-ref
 const { scheduleSnapshot, diffSchedules, formatChangeAlert } = require('../lib/change-monitor');
 const { editRichMessage, sendRichMessage, deleteMessage } = require('../lib/telegram');
 
+function minskHour() {
+  return Number(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Minsk', hour: '2-digit', hour12: false,
+  }).format(new Date()));
+}
+
 async function sendMorningDigests(store, html) {
   const dashboards = await store.list();
   let sent = 0;
@@ -22,7 +28,7 @@ async function sendMorningDigests(store, html) {
       else console.error(`[check-changes] digest ${dashboard.chatId}:`, error.message);
     }
   }));
-  return sent;
+  return { sent, total: dashboards.length };
 }
 
 async function notifyDashboards(store, html) {
@@ -66,10 +72,16 @@ module.exports = async (req, res) => {
       });
     }
     const notifications = changes.length ? await notifyDashboards(store, formatChangeAlert(changes)) : 0;
-    // Сводку шлём только на реальной смене дня, а не на первом запуске после
-    // настройки: иначе она пришла бы посреди дня.
-    const dayStarted = Boolean(previous?.today) && previous.today !== next.today;
-    const digests = dayStarted ? await sendMorningDigests(store, formatMorningDigest(payload)) : 0;
+    // Проверки идут круглосуточно, поэтому сводка не привязана к смене дня
+    // (иначе приходила бы в полночь): шлём раз в день первой проверкой
+    // после 8:00 по Минску. Дату последней сводки храним отдельно.
+    let digests = 0;
+    if (minskHour() >= 8 && await store.getDigestDate() !== payload.today) {
+      const result = await sendMorningDigests(store, formatMorningDigest(payload));
+      digests = result.sent;
+      // При сбое отправки дату не сохраняем — следующая проверка повторит.
+      if (result.sent > 0 || result.total === 0) await store.saveDigestDate(payload.today);
+    }
     return res.status(200).json({ ok: true, baseline: !previous, dayChanged, changed: changes.length, notifications, digests });
   } catch (error) {
     console.error('[check-changes] failed:', error.message);
