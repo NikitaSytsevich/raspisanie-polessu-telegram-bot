@@ -14,6 +14,15 @@ test('the final session does not absorb unrelated page text', () => {
   ]);
 });
 
+test('table headers with short weekday names are recognized', () => {
+  const $ = cheerio.load(`<main><table>
+    <tr><th>Время</th><th>Пн</th><th>Вт</th><th>Ср.</th><th>Чт</th></tr>
+    <tr><td>9.15-10.00</td><td>Зал</td><td></td><td>Зал</td><td></td></tr>
+  </table></main>`);
+  const sessions = sessionsFromTables($, $('main'), '2026-07-13');
+  assert.deepEqual(sessions.map(s => s.date), ['2026-07-13', '2026-07-15']);
+});
+
 test('weekly tables produce sessions with hours and minutes intact', () => {
   const $ = cheerio.load(`<main><table>
     <tr><th>Время</th><th>Понедельник</th><th>Вторник</th><th>Среда</th><th>Четверг</th></tr>

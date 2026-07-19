@@ -84,7 +84,10 @@ module.exports = async (req, res) => {
   if (!secret || !process.env.TELEGRAM_BOT_TOKEN || !redisUrl || !redisToken) {
     return res.status(503).json({ ok: false, error: 'not_configured' });
   }
-  const setupToken = new URL(req.url || '/', `https://${req.headers?.host || 'localhost'}`).searchParams.get('setup') || '';
+  // Предпочтительно передавать секрет заголовком (не попадает в логи запросов);
+  // query-параметр оставлен для настройки из браузера — после неё секрет стоит заменить.
+  const setupToken = String(req.headers?.['x-setup-secret'] || '')
+    || new URL(req.url || '/', `https://${req.headers?.host || 'localhost'}`).searchParams.get('setup') || '';
   if (req.method === 'GET' && safeEqual(setupToken, secret)) {
     try { await setup(req, res); } catch (error) { res.status(500).json({ ok: false, error: error.message }); }
     return;

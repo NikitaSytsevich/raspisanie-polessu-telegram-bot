@@ -2,7 +2,7 @@ const { safeEqual } = require('../lib/auth');
 const { getSchedule } = require('../lib/schedule');
 const { formatDay, formatMorningDigest, navKeyboard } = require('../lib/format');
 const { dashboardStore } = require('../lib/dashboard-store');
-const { refreshDashboards, isRemovedDashboardError } = require('../lib/daily-refresh');
+const { refreshDashboards, isRemovedDashboardError, inBatches } = require('../lib/daily-refresh');
 const { scheduleSnapshot, diffSchedules, formatChangeAlert } = require('../lib/change-monitor');
 const { editRichMessage, sendRichMessage, deleteMessage } = require('../lib/telegram');
 
@@ -12,10 +12,9 @@ function minskHour() {
   }).format(new Date()));
 }
 
-async function sendMorningDigests(store, html) {
-  const dashboards = await store.list();
+async function sendMorningDigests(store, dashboards, html) {
   let sent = 0;
-  await Promise.all(dashboards.map(async dashboard => {
+  await inBatches(dashboards, async dashboard => {
     try {
       // В чате живёт ровно одна сводка: вчерашнюю удаляем, новую шлём без звука.
       const previousDigest = await store.getDigestMessageId(dashboard.chatId);
@@ -27,14 +26,13 @@ async function sendMorningDigests(store, html) {
       if (isRemovedDashboardError(error)) await store.remove(dashboard.chatId);
       else console.error(`[check-changes] digest ${dashboard.chatId}:`, error.message);
     }
-  }));
+  });
   return { sent, total: dashboards.length };
 }
 
-async function notifyDashboards(store, html) {
-  const dashboards = await store.list();
+async function notifyDashboards(store, dashboards, html) {
   let sent = 0;
-  await Promise.all(dashboards.map(async dashboard => {
+  await inBatches(dashboards, async dashboard => {
     try {
       await sendRichMessage(dashboard.chatId, html);
       sent += 1;
@@ -42,7 +40,7 @@ async function notifyDashboards(store, html) {
       if (isRemovedDashboardError(error)) await store.remove(dashboard.chatId);
       else console.error(`[check-changes] notification ${dashboard.chatId}:`, error.message);
     }
-  }));
+  });
   return sent;
 }
 
@@ -55,6 +53,7 @@ module.exports = async (req, res) => {
   try {
     const payload = await getSchedule({ force: true });
     const store = dashboardStore();
+    const dashboards = await store.list();
     const next = scheduleSnapshot(payload);
     const previous = await store.getSnapshot();
     const changes = previous ? diffSchedules(previous, next) : [];
@@ -66,18 +65,19 @@ module.exports = async (req, res) => {
     if (dayChanged || changes.length) {
       await refreshDashboards({
         store,
+        dashboards,
         html: formatDay(payload, payload.today),
         replyMarkup: navKeyboard(payload.today, payload.today),
         edit: editRichMessage,
       });
     }
-    const notifications = changes.length ? await notifyDashboards(store, formatChangeAlert(changes)) : 0;
+    const notifications = changes.length ? await notifyDashboards(store, dashboards, formatChangeAlert(changes)) : 0;
     // Проверки идут круглосуточно, поэтому сводка не привязана к смене дня
     // (иначе приходила бы в полночь): шлём раз в день первой проверкой
     // после 8:00 по Минску. Дату последней сводки храним отдельно.
     let digests = 0;
     if (minskHour() >= 8 && await store.getDigestDate() !== payload.today) {
-      const result = await sendMorningDigests(store, formatMorningDigest(payload));
+      const result = await sendMorningDigests(store, dashboards, formatMorningDigest(payload));
       digests = result.sent;
       // При сбое отправки дату не сохраняем — следующая проверка повторит.
       if (result.sent > 0 || result.total === 0) await store.saveDigestDate(payload.today);
