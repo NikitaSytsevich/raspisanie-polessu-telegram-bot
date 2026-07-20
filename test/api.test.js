@@ -103,3 +103,22 @@ test('check-changes requires the secret and reports schedule diffs', async () =>
   const alert = telegramCalls.find(call => call.method === 'sendRichMessage' && !call.params.disable_notification);
   assert.match(alert.params.rich_message.html, /Расписание обновлено/);
 });
+
+test('site changes also refresh the already sent morning digest', async () => {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Minsk', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+  redis.set('polessu:schedule:digest-date', today);
+  redis.set('polessu:schedule:digest:42', '555');
+
+  pageHtml = pageHtml.replace('21.00 – 21.45', '21.00 – 21.45 22.00 – 22.45');
+  telegramCalls.length = 0;
+  const res = makeRes();
+  await checkChangesHandler({ method: 'POST', headers: { authorization: `Bearer ${process.env.CHANGE_CHECK_SECRET}` } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.changed >= 1, 'change detected');
+  assert.equal(res.body.digests, 0, 'no new digest is sent');
+  assert.equal(res.body.digestsRefreshed, 1, 'existing digest is edited');
+  const edited = telegramCalls.find(call => call.method === 'editMessageText' && call.params.message_id === 555);
+  assert.match(edited.params.rich_message.html, /Сегодня/);
+});
