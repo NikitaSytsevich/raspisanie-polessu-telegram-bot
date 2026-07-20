@@ -102,6 +102,22 @@ test('check-changes requires the secret and reports schedule diffs', async () =>
   assert.equal(second.body.notifications, 1);
   const alert = telegramCalls.find(call => call.method === 'sendRichMessage' && !call.params.disable_notification);
   assert.match(alert.params.rich_message.html, /Расписание обновлено/);
+  assert.equal(alert.params.reply_markup.inline_keyboard[0][0].callback_data, 'ack');
+});
+
+test('ack button deletes the change alert message', async () => {
+  telegramCalls.length = 0;
+  const res = makeRes();
+  await telegramHandler({
+    method: 'POST',
+    url: '/api/telegram',
+    headers: { 'x-telegram-bot-api-secret-token': process.env.TELEGRAM_WEBHOOK_SECRET },
+    body: { callback_query: { id: 'cb1', data: 'ack', message: { chat: { id: 42 }, message_id: 777 } } },
+  }, res);
+  assert.equal(res.statusCode, 200);
+  const deleted = telegramCalls.find(call => call.method === 'deleteMessage');
+  assert.deepEqual(deleted.params, { chat_id: 42, message_id: 777 });
+  assert.ok(telegramCalls.find(call => call.method === 'answerCallbackQuery'), 'callback is answered');
 });
 
 test('site changes also refresh the already sent morning digest', async () => {

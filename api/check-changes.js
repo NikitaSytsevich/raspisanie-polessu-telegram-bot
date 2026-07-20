@@ -1,6 +1,6 @@
 const { safeEqual } = require('../lib/auth');
 const { getSchedule } = require('../lib/schedule');
-const { formatDay, formatMorningDigest, navKeyboard } = require('../lib/format');
+const { ACK_KEYBOARD, formatDay, formatMorningDigest, navKeyboard } = require('../lib/format');
 const { dashboardStore } = require('../lib/dashboard-store');
 const { refreshDashboards, isRemovedDashboardError, isUnchangedMessageError, inBatches } = require('../lib/daily-refresh');
 const { scheduleSnapshot, diffSchedules, formatChangeAlert } = require('../lib/change-monitor');
@@ -53,7 +53,7 @@ async function notifyDashboards(store, dashboards, html) {
   let sent = 0;
   await inBatches(dashboards, async dashboard => {
     try {
-      await sendRichMessage(dashboard.chatId, html);
+      await sendRichMessage(dashboard.chatId, html, ACK_KEYBOARD);
       sent += 1;
     } catch (error) {
       if (isRemovedDashboardError(error)) await store.remove(dashboard.chatId);

@@ -1,5 +1,5 @@
 const { safeEqual } = require('../lib/auth');
-const { tgApi, sendRichMessage, editRichMessage, answerCallbackQuery } = require('../lib/telegram');
+const { tgApi, sendRichMessage, editRichMessage, answerCallbackQuery, deleteMessage } = require('../lib/telegram');
 const { addDays, getSchedule } = require('../lib/schedule');
 const { SOURCES, formatDay, navKeyboard, sourcesKeyboard } = require('../lib/format');
 const { dashboardStore } = require('../lib/dashboard-store');
@@ -33,6 +33,14 @@ async function handleCallback(callback) {
   let toast;
   try {
     if (!chatId || !messageId) return;
+    if (data === 'ack') {
+      // «Ознакомлен» под сообщением об изменениях: удаляем его, чтобы чат
+      // не зарастал. Telegram не даёт удалять сообщения старше 48 часов.
+      await deleteMessage(chatId, messageId).catch(() => {
+        toast = 'Сообщение старше 48 часов — удалите его вручную';
+      });
+      return;
+    }
     const source = /^s:(\d{4}-\d{2}-\d{2}):(all|ice_arena|sports_pool|small_pool|rowing_base)$/.exec(data);
     if (source) {
       const payload = await getSchedule();
