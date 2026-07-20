@@ -11,16 +11,10 @@ async function sendCommand(chatId, command) {
   const replyMarkup = navKeyboard(initial.today, initial.today);
   const store = dashboardStore();
   const existing = await store.get(chatId);
-  if (existing) {
-    try {
-      await editRichMessage(chatId, existing.messageId, html, replyMarkup);
-      return existing;
-    } catch (error) {
-      if (/message is not modified/i.test(error.message)) return existing;
-      // Пользователь мог удалить карточку вручную. Создаём её заново и заменяем ID.
-      if (!/message to edit not found/i.test(error.message)) throw error;
-    }
-  }
+  // Старую карточку не редактируем, а пересоздаём: после очистки истории
+  // «только у себя» она жива для бота, но невидима для пользователя — и
+  // успешное редактирование выглядело бы как молчание в ответ на /start.
+  if (existing) await deleteMessage(chatId, existing.messageId).catch(() => {});
   const message = await sendRichMessage(chatId, html, replyMarkup);
   await store.save(chatId, message.message_id);
   return message;

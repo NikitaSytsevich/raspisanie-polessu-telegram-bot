@@ -105,6 +105,25 @@ test('check-changes requires the secret and reports schedule diffs', async () =>
   assert.equal(alert.params.reply_markup.inline_keyboard[0][0].callback_data, 'ack');
 });
 
+test('repeated /start recreates the card so it stays visible after history clear', async () => {
+  telegramCalls.length = 0;
+  const res = makeRes();
+  await telegramHandler({
+    method: 'POST',
+    url: '/api/telegram',
+    headers: { 'x-telegram-bot-api-secret-token': process.env.TELEGRAM_WEBHOOK_SECRET },
+    body: { message: { text: '/start', chat: { id: 42 } } },
+  }, res);
+  assert.equal(res.statusCode, 200);
+  // Старая карточка (после очистки истории она невидима) удаляется,
+  // вместо редактирования приходит новая, ID в хранилище заменяется.
+  const deleted = telegramCalls.find(call => call.method === 'deleteMessage');
+  assert.deepEqual(deleted.params, { chat_id: 42, message_id: 101 });
+  const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
+  assert.ok(sent, 'new card is sent instead of editing the invisible one');
+  assert.equal(redis.get('polessu:schedule:dashboard:42'), JSON.stringify({ messageId: 102 }));
+});
+
 test('ack button deletes the change alert message', async () => {
   telegramCalls.length = 0;
   const res = makeRes();
