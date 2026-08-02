@@ -24,10 +24,17 @@ function runCommand([cmd, key, ...args]) {
 }
 
 const telegramCalls = [];
+// Дата страницы — всегда сегодняшняя: парсер отбрасывает сеансы старше недели,
+// поэтому фикстура с жёстко зашитым числом однажды перестала бы что-либо давать.
+const { todayIso } = require('../lib/schedule');
+const TODAY = todayIso();
+const [year, month, day] = TODAY.split('-');
 const PAGE = `<html><body><main>
-  Понедельник 13.07.2026 10.30 – 11.15 (свободно 3 дорожки) 19.15 – 20.00
+  Понедельник ${day}.${month}.${year} 10.30 – 11.15 (свободно 3 дорожки) 19.15 – 20.00
 </main></body></html>`;
 let pageHtml = PAGE;
+
+let messageIdSeq = 100;
 
 global.fetch = async (url, options = {}) => {
   const target = String(url);
@@ -39,8 +46,11 @@ global.fetch = async (url, options = {}) => {
     return ok({ result: runCommand(JSON.parse(options.body)) });
   }
   if (target.includes('api.telegram.org')) {
-    telegramCalls.push({ method: target.split('/').pop(), params: JSON.parse(options.body) });
-    return ok({ ok: true, result: { message_id: 100 + telegramCalls.length } });
+    // Счётчик сквозной, а не длина telegramCalls: тесты чистят массив, и ID
+    // сообщений начинали бы повторяться между ними.
+    const messageId = ++messageIdSeq;
+    telegramCalls.push({ method: target.split('/').pop(), params: JSON.parse(options.body), messageId });
+    return ok({ ok: true, result: { message_id: messageId } });
   }
   if (target.includes('polessu.by')) {
     return { ok: true, status: 200, headers: { get: () => 'text/html; charset=utf-8' }, arrayBuffer: async () => new TextEncoder().encode(pageHtml).buffer };
@@ -77,7 +87,7 @@ test('start command creates the dashboard card and stores its id', async () => {
   const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
   assert.ok(sent, 'card message is sent');
   assert.match(sent.params.rich_message.html, /Ледовая арена/);
-  assert.equal(redis.get('polessu:schedule:dashboard:42'), JSON.stringify({ messageId: 101 }));
+  assert.equal(redis.get('polessu:schedule:dashboard:42'), JSON.stringify({ messageId: sent.messageId }));
 });
 
 test('check-changes requires the secret and reports schedule diffs', async () => {
@@ -106,6 +116,7 @@ test('check-changes requires the secret and reports schedule diffs', async () =>
 });
 
 test('repeated /start recreates the card so it stays visible after history clear', async () => {
+  const previousCardId = JSON.parse(redis.get('polessu:schedule:dashboard:42')).messageId;
   telegramCalls.length = 0;
   const res = makeRes();
   await telegramHandler({
@@ -118,10 +129,16 @@ test('repeated /start recreates the card so it stays visible after history clear
   // Старая карточка (после очистки истории она невидима) удаляется,
   // вместо редактирования приходит новая, ID в хранилище заменяется.
   const deleted = telegramCalls.find(call => call.method === 'deleteMessage');
-  assert.deepEqual(deleted.params, { chat_id: 42, message_id: 101 });
+  assert.deepEqual(deleted.params, { chat_id: 42, message_id: previousCardId });
   const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
   assert.ok(sent, 'new card is sent instead of editing the invisible one');
-  assert.equal(redis.get('polessu:schedule:dashboard:42'), JSON.stringify({ messageId: 102 }));
+  assert.equal(redis.get('polessu:schedule:dashboard:42'), JSON.stringify({ messageId: sent.messageId }));
+  // Порядок важен: сначала новая карточка, потом удаление старой — иначе
+  // сбой отправки оставил бы чат вообще без карточки.
+  assert.ok(
+    telegramCalls.indexOf(sent) < telegramCalls.indexOf(deleted),
+    'the old card is deleted only after the new one is delivered',
+  );
 });
 
 test('ack button deletes the change alert message', async () => {

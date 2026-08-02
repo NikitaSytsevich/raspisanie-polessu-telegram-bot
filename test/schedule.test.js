@@ -30,10 +30,12 @@ test('weekly tables produce sessions with hours and minutes intact', () => {
     <tr><td>18.00-19.30</td><td></td><td>Тренажёрный зал</td><td></td><td>Зал штанги</td></tr>
   </table></main>`);
   const sessions = sessionsFromTables($, $('main'), '2026-07-13');
+  // Вместе с датой сохраняется день недели: по нему сеансы недельной таблицы
+  // сравниваются между проверками, иначе их сдвиг читался бы как изменение.
   assert.deepEqual(sessions, [
-    { date: '2026-07-13', start: '09:15', end: '10:00', activity: 'Тренажёрный зал' },
-    { date: '2026-07-15', start: '09:15', end: '10:00', activity: 'Зал штанги' },
-    { date: '2026-07-14', start: '18:00', end: '19:30', activity: 'Тренажёрный зал' },
-    { date: '2026-07-16', start: '18:00', end: '19:30', activity: 'Зал штанги' },
+    { date: '2026-07-13', weekday: 1, start: '09:15', end: '10:00', activity: 'Тренажёрный зал' },
+    { date: '2026-07-15', weekday: 3, start: '09:15', end: '10:00', activity: 'Зал штанги' },
+    { date: '2026-07-14', weekday: 2, start: '18:00', end: '19:30', activity: 'Тренажёрный зал' },
+    { date: '2026-07-16', weekday: 4, start: '18:00', end: '19:30', activity: 'Зал штанги' },
   ]);
 });

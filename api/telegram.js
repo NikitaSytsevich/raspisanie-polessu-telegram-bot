@@ -14,9 +14,11 @@ async function sendCommand(chatId, command) {
   // Старую карточку не редактируем, а пересоздаём: после очистки истории
   // «только у себя» она жива для бота, но невидима для пользователя — и
   // успешное редактирование выглядело бы как молчание в ответ на /start.
-  if (existing) await deleteMessage(chatId, existing.messageId).catch(() => {});
   const message = await sendRichMessage(chatId, html, replyMarkup);
   await store.save(chatId, message.message_id);
+  // Удаляем прошлую карточку последней: упади отправка раньше, в чате и в
+  // хранилище осталась бы рабочая старая, а не ссылка на удалённое сообщение.
+  if (existing) await deleteMessage(chatId, existing.messageId).catch(() => {});
   return message;
 }
 

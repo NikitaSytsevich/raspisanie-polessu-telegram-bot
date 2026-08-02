@@ -1,14 +1,14 @@
 const { safeEqual } = require('../lib/auth');
-const { getSchedule } = require('../lib/schedule');
+const { getSchedule, TZ } = require('../lib/schedule');
 const { ACK_KEYBOARD, formatDay, formatMorningDigest, navKeyboard } = require('../lib/format');
 const { dashboardStore } = require('../lib/dashboard-store');
 const { refreshDashboards, isRemovedDashboardError, isUnchangedMessageError, inBatches } = require('../lib/daily-refresh');
-const { scheduleSnapshot, diffSchedules, formatChangeAlert } = require('../lib/change-monitor');
+const { SNAPSHOT_VERSION, scheduleSnapshot, diffSchedules, formatChangeAlert } = require('../lib/change-monitor');
 const { editRichMessage, sendRichMessage, deleteMessage } = require('../lib/telegram');
 
 function minskHour() {
   return Number(new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Europe/Minsk', hour: '2-digit', hour12: false,
+    timeZone: TZ, hour: '2-digit', hour12: false,
   }).format(new Date()));
 }
 
@@ -74,9 +74,10 @@ module.exports = async (req, res) => {
     const store = dashboardStore();
     const dashboards = await store.list();
     const next = scheduleSnapshot(payload);
-    const previous = await store.getSnapshot();
+    const stored = await store.getSnapshot();
+    // Снимок старого формата сравнивать не с чем: молча сохраняем новый.
+    const previous = stored?.version === SNAPSHOT_VERSION ? stored : null;
     const changes = previous ? diffSchedules(previous, next) : [];
-    await store.saveSnapshot(next);
 
     // Первая проверка нового дня обновляет карточки даже без изменений:
     // иначе до первого нажатия кнопки они показывают вчерашнюю дату.
@@ -91,6 +92,9 @@ module.exports = async (req, res) => {
       });
     }
     const notifications = changes.length ? await notifyDashboards(store, dashboards, formatChangeAlert(changes)) : 0;
+    // Снимок сохраняем только после рассылки: если функция упадёт или упрётся
+    // в maxDuration раньше, следующая проверка найдёт те же изменения заново.
+    await store.saveSnapshot(next);
     // Проверки идут круглосуточно, поэтому сводка не привязана к смене дня
     // (иначе приходила бы в полночь): шлём раз в день первой проверкой
     // после 8:00 по Минску. Дату последней сводки храним отдельно.
