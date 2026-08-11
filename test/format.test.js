@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { formatDay, formatMorningDigest, navKeyboard, sourcesKeyboard } = require('../lib/format');
+const { cardView, formatDay, formatNotifications, navKeyboard, notificationsKeyboard } = require('../lib/format');
+const { toggleSubscription } = require('../lib/subscriptions');
 
 const payload = {
   today: '2026-07-12',
@@ -26,36 +27,44 @@ test('facility filter keeps the official source link on the facility name', () =
   assert.match(html, /<b><a href=/);
 });
 
-test('morning digest is one line per facility with correct plurals', () => {
-  const digest = formatMorningDigest({
-    today: '2026-07-12',
-    facilities: [
-      { id: 'ice_arena', name: 'Ледовая арена', sourceUrl: 'https://example.test/ice', status: 'ok',
-        sessions: [
-          { date: '2026-07-12', start: '14:00', end: '14:45', activity: '' },
-          { date: '2026-07-12', start: '18:30', end: '19:15', activity: '' },
-          { date: '2026-07-13', start: '10:00', end: '11:00', activity: '' },
-        ] },
-      { id: 'sports_pool', name: 'Большой бассейн', sourceUrl: 'https://example.test/pool', status: 'ok',
-        sessions: [{ date: '2026-07-12', start: '09:15', end: '10:00', activity: '' }] },
-      { id: 'rowing_base', name: 'Гребная база', sourceUrl: 'https://example.test/row', status: 'closed', notice: 'каникулы', sessions: [] },
-    ],
-  });
-  assert.match(digest, /<h3>☀️ Сегодня · вс, 12 июля<\/h3>/);
-  // Сеансы чужой даты не попадают в сводку, склонения корректны.
-  assert.match(digest, /Ледовая арена<\/b> — 2 сеанса, 14:00–19:15/);
-  assert.match(digest, /Большой бассейн<\/b> — 1 сеанс, 09:15–10:00/);
-  assert.match(digest, /Гребная база<\/b> — закрыто/);
-  assert.doesNotMatch(digest, /10:00–11:00/);
-});
-
-test('navigation stores only compact callback payloads', () => {
-  const keyboard = navKeyboard('2026-07-12', '2026-07-12');
+test('navigation fits three rows and stores only compact callback payloads', () => {
+  const keyboard = navKeyboard('2026-07-12', '2026-07-12', 'ice_arena');
+  assert.equal(keyboard.inline_keyboard.length, 3);
+  // Даты, объекты, настройки: по одному вопросу на ряд, объекты — одной строкой.
+  assert.equal(keyboard.inline_keyboard[0].length, 3);
+  assert.equal(keyboard.inline_keyboard[1].length, 5);
+  assert.equal(keyboard.inline_keyboard[1][1].text, '• ⛸');
+  assert.deepEqual(keyboard.inline_keyboard[2].map(button => button.callback_data), [
+    'n:menu:2026-07-12:ice_arena',
+    'r:2026-07-12:ice_arena',
+  ]);
   for (const row of keyboard.inline_keyboard) for (const button of row) assert.ok(button.callback_data.length <= 64);
 });
 
-test('sources are separated from the schedule and return to the same view', () => {
-  const keyboard = sourcesKeyboard(payload, payload.today, 'ice');
-  assert.equal(keyboard.inline_keyboard[0][0].url, payload.facilities[0].sourceUrl);
-  assert.equal(keyboard.inline_keyboard.at(-1)[0].callback_data, 'd:2026-07-12:ice');
+test('background refresh keeps the facility the chat is looking at', () => {
+  const { html, replyMarkup } = cardView(payload, { view: 'ice' });
+  assert.match(html, /<h3>Арена &amp; зал/);
+  assert.equal(replyMarkup.inline_keyboard[1][0].text, 'Все');
+});
+
+test('notification screen shows the current subscription and offers one switch', () => {
+  const all = notificationsKeyboard(null, '2026-07-12', 'all');
+  assert.match(formatNotifications(null), /сообщаю обо всех объектах/);
+  assert.equal(all.inline_keyboard[0][0].text, '✅ ⛸ Ледовая арена');
+  assert.equal(all.inline_keyboard.at(-2)[0].text, '🔕 Выключить все');
+  assert.equal(all.inline_keyboard.at(-1)[0].callback_data, 'd:2026-07-12:all');
+
+  const single = notificationsKeyboard(['ice_arena'], '2026-07-12', 'all');
+  assert.match(formatNotifications(['ice_arena']), /Сейчас: ⛸ Ледовая арена\./);
+  assert.equal(single.inline_keyboard[1][0].text, '⬜️ 🏊 Большой бассейн');
+
+  const off = notificationsKeyboard([], '2026-07-12', 'all');
+  assert.match(formatNotifications([]), /уведомления выключены/);
+  assert.equal(off.inline_keyboard.at(-2)[0].text, '🔔 Включить все');
+});
+
+test('toggling every facility back on collapses the subscription to “all”', () => {
+  const withoutIce = toggleSubscription(null, 'ice_arena');
+  assert.deepEqual(withoutIce, ['sports_pool', 'small_pool', 'rowing_base']);
+  assert.equal(toggleSubscription(withoutIce, 'ice_arena'), null);
 });

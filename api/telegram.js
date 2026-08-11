@@ -1,25 +1,52 @@
 const { safeEqual } = require('../lib/auth');
 const { tgApi, sendRichMessage, editRichMessage, answerCallbackQuery, deleteMessage } = require('../lib/telegram');
-const { addDays, getSchedule } = require('../lib/schedule');
-const { SOURCES, formatDay, navKeyboard, sourcesKeyboard } = require('../lib/format');
+const { getSchedule } = require('../lib/schedule');
+const { formatDay, formatNotifications, navKeyboard, notificationsKeyboard } = require('../lib/format');
+const { ALL_FACILITY_IDS, toggleSubscription } = require('../lib/subscriptions');
 const { dashboardStore } = require('../lib/dashboard-store');
+
+const FACILITY_IDS = ALL_FACILITY_IDS.join('|');
+const DATE = '\\d{4}-\\d{2}-\\d{2}';
+const DAY_ACTION_RE = new RegExp(`^(d|r):(${DATE}):(all|${FACILITY_IDS})$`);
+const FACILITY_ACTION_RE = new RegExp(`^f:(all|${FACILITY_IDS}):(${DATE})$`);
+const NOTIFY_ACTION_RE = new RegExp(`^n:(menu|all|off|${FACILITY_IDS}):(${DATE}):(all|${FACILITY_IDS})$`);
 
 async function sendCommand(chatId, command) {
   if (command !== 'start' && command !== 'help') return null;
-  const initial = await getSchedule();
-  const html = formatDay(initial, initial.today);
-  const replyMarkup = navKeyboard(initial.today, initial.today);
   const store = dashboardStore();
   const existing = await store.get(chatId);
+  const payload = await getSchedule();
+  // Карточка открывается на том же объекте, что и в прошлый раз. Если объект
+  // не выбран, но в уведомлениях отмечен ровно один — открываем сразу на нём:
+  // «мой объект» задаётся один раз в настройках и работает на обоих экранах.
+  const chosen = existing?.view && existing.view !== 'all' ? existing.view : null;
+  const selected = chosen || (existing?.facilities?.length === 1 ? existing.facilities[0] : 'all');
   // Старую карточку не редактируем, а пересоздаём: после очистки истории
   // «только у себя» она жива для бота, но невидима для пользователя — и
   // успешное редактирование выглядело бы как молчание в ответ на /start.
-  const message = await sendRichMessage(chatId, html, replyMarkup);
-  await store.save(chatId, message.message_id);
+  const message = await sendRichMessage(chatId, formatDay(payload, payload.today, selected), navKeyboard(payload.today, payload.today, selected));
+  await store.save(chatId, message.message_id, { view: selected });
   // Удаляем прошлую карточку последней: упади отправка раньше, в чате и в
   // хранилище осталась бы рабочая старая, а не ссылка на удалённое сообщение.
   if (existing) await deleteMessage(chatId, existing.messageId).catch(() => {});
+  const digestMessageId = await store.clearDigest(chatId).catch(() => null);
+  if (digestMessageId) await deleteMessage(chatId, digestMessageId).catch(() => {});
   return message;
+}
+
+async function showNotifications(chatId, messageId, action, date, selected) {
+  const store = dashboardStore();
+  const dashboard = await store.get(chatId);
+  if (!dashboard) return 'Карточка не найдена — отправьте /start';
+  let subscribed = dashboard.facilities;
+  if (action !== 'menu') {
+    if (action === 'all') subscribed = null;
+    else if (action === 'off') subscribed = [];
+    else subscribed = toggleSubscription(subscribed, action);
+    await store.update(chatId, { facilities: subscribed });
+  }
+  await editRichMessage(chatId, messageId, formatNotifications(subscribed), notificationsKeyboard(subscribed, date, selected));
+  return undefined;
 }
 
 async function handleCallback(callback) {
@@ -37,21 +64,26 @@ async function handleCallback(callback) {
       });
       return;
     }
-    const source = /^s:(\d{4}-\d{2}-\d{2}):(all|ice_arena|sports_pool|small_pool|rowing_base)$/.exec(data);
-    if (source) {
-      const payload = await getSchedule();
-      await editRichMessage(chatId, messageId, SOURCES, sourcesKeyboard(payload, source[1], source[2]));
+    const notifyAction = NOTIFY_ACTION_RE.exec(data);
+    if (notifyAction) {
+      toast = await showNotifications(chatId, messageId, notifyAction[1], notifyAction[2], notifyAction[3]);
       return;
     }
-    const dayAction = /^(d|r):(today|tomorrow|\d{4}-\d{2}-\d{2}):(all|ice_arena|sports_pool|small_pool|rowing_base)$/.exec(data);
-    const facilityAction = /^f:(all|ice_arena|sports_pool|small_pool|rowing_base):(\d{4}-\d{2}-\d{2})$/.exec(data);
-    if (!dayAction && !facilityAction) return;
+    const dayAction = DAY_ACTION_RE.exec(data);
+    const facilityAction = FACILITY_ACTION_RE.exec(data);
+    if (!dayAction && !facilityAction) {
+      // Кнопка из карточки прошлой версии: перерисовать её нечем, зато можно
+      // объяснить, что делать.
+      toast = 'Кнопка устарела — отправьте /start';
+      return;
+    }
     const force = dayAction?.[1] === 'r';
     const payload = await getSchedule({ force });
-    const rawDate = facilityAction ? facilityAction[2] : dayAction[2];
-    const rawSelected = facilityAction ? facilityAction[1] : dayAction[3];
-    const date = rawDate === 'today' ? payload.today : rawDate === 'tomorrow' ? addDays(payload.today, 1) : rawDate;
-    const selected = rawSelected === 'all' || payload.facilities.some(facility => facility.id === rawSelected) ? rawSelected : 'all';
+    const date = facilityAction ? facilityAction[2] : dayAction[2];
+    const selected = facilityAction ? facilityAction[1] : dayAction[3];
+    // Выбор объекта запоминаем: фоновые обновления перерисовывают карточку
+    // и без этого возвращали бы её к «Всем объектам».
+    if (facilityAction) await dashboardStore().update(chatId, { view: selected }).catch(() => {});
     await editRichMessage(chatId, messageId, formatDay(payload, date, selected), navKeyboard(date, payload.today, selected));
     // Тост подтверждаем только после успешного обновления карточки.
     if (force) toast = 'Расписание обновлено ✓';
@@ -72,12 +104,10 @@ async function setup(req, res) {
   const commands = await tgApi('setMyCommands', { commands: [
     { command: 'start', description: 'Открыть расписание' },
   ] });
-  const description = await tgApi('setMyDescription', {
-    description: 'Расписание спортивных объектов ПолесГУ: ледовая арена, большой и малый бассейны, гребная база. Данные загружаются с официального сайта университета, а при изменениях бот присылает сводку.',
-  });
-  const shortDescription = await tgApi('setMyShortDescription', {
-    short_description: 'Расписание спортобъектов ПолесГУ с официального сайта',
-  });
+  // Описание снято намеренно: экран «Что умеет этот бот?» занимал весь чат до
+  // первого /start. Пустая строка стирает ранее заданный текст.
+  const description = await tgApi('setMyDescription', { description: '' });
+  const shortDescription = await tgApi('setMyShortDescription', { short_description: '' });
   res.status(200).json({ ok: true, webhook, commands, description, shortDescription });
 }
 

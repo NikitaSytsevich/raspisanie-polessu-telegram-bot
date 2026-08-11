@@ -110,7 +110,7 @@ test('check-changes requires the secret and reports schedule diffs', async () =>
   assert.equal(second.statusCode, 200);
   assert.ok(second.body.changed >= 1, 'change detected');
   assert.equal(second.body.notifications, 1);
-  const alert = telegramCalls.find(call => call.method === 'sendRichMessage' && !call.params.disable_notification);
+  const alert = telegramCalls.find(call => call.method === 'sendRichMessage');
   assert.match(alert.params.rich_message.html, /Расписание обновлено/);
   assert.equal(alert.params.reply_markup.inline_keyboard[0][0].callback_data, 'ack');
 });
@@ -141,36 +141,98 @@ test('repeated /start recreates the card so it stays visible after history clear
   );
 });
 
+async function pressButton(data) {
+  const res = makeRes();
+  await telegramHandler({
+    method: 'POST',
+    url: '/api/telegram',
+    headers: { 'x-telegram-bot-api-secret-token': process.env.TELEGRAM_WEBHOOK_SECRET },
+    body: { callback_query: { id: 'cb', data, message: { chat: { id: 42 }, message_id: 777 } } },
+  }, res);
+  assert.equal(res.statusCode, 200);
+  return res;
+}
+
+async function runCheck() {
+  const res = makeRes();
+  await checkChangesHandler({ method: 'POST', headers: { authorization: `Bearer ${process.env.CHANGE_CHECK_SECRET}` } }, res);
+  assert.equal(res.statusCode, 200);
+  return res;
+}
+
 test('ack button deletes the change alert message', async () => {
+  telegramCalls.length = 0;
+  await pressButton('ack');
+  const deleted = telegramCalls.find(call => call.method === 'deleteMessage');
+  assert.deepEqual(deleted.params, { chat_id: 42, message_id: 777 });
+  assert.ok(telegramCalls.find(call => call.method === 'answerCallbackQuery'), 'callback is answered');
+});
+
+test('facility button remembers the chosen object for background refreshes', async () => {
+  telegramCalls.length = 0;
+  await pressButton(`f:ice_arena:${TODAY}`);
+  const edited = telegramCalls.find(call => call.method === 'editMessageText');
+  assert.match(edited.params.rich_message.html, /<h3>⛸ Ледовая арена/);
+  assert.equal(JSON.parse(redis.get('polessu:schedule:dashboard:42')).view, 'ice_arena');
+});
+
+test('notification screen switches the subscription off and back on per facility', async () => {
+  telegramCalls.length = 0;
+  await pressButton(`n:menu:${TODAY}:ice_arena`);
+  const menu = telegramCalls.find(call => call.method === 'editMessageText');
+  assert.match(menu.params.rich_message.html, /Уведомления об изменениях/);
+  // Экран открыт поверх карточки: возврат ведёт к тому же объекту и дню.
+  assert.equal(menu.params.reply_markup.inline_keyboard.at(-1)[0].callback_data, `d:${TODAY}:ice_arena`);
+
+  await pressButton(`n:off:${TODAY}:ice_arena`);
+  await pressButton(`n:ice_arena:${TODAY}:ice_arena`);
+  assert.deepEqual(JSON.parse(redis.get('polessu:schedule:dashboard:42')).facilities, ['ice_arena']);
+});
+
+test('change alerts cover only the facilities the chat subscribed to', async () => {
+  // Фикстура одна на все страницы: правка меняет расписание сразу всех объектов.
+  pageHtml = pageHtml.replace('10.30 – 11.15', '10.30 – 11.15 12.00 – 12.45');
+  telegramCalls.length = 0;
+  const res = await runCheck();
+  assert.ok(res.body.changed >= 2, 'every facility changed');
+  assert.equal(res.body.notifications, 1);
+  const alert = telegramCalls.find(call => call.method === 'sendRichMessage');
+  assert.match(alert.params.rich_message.html, /Ледовая арена/);
+  assert.doesNotMatch(alert.params.rich_message.html, /Большой бассейн/);
+  // Карточка при этом обновляется целиком и остаётся на выбранном объекте.
+  const card = telegramCalls.find(call => call.method === 'editMessageText');
+  assert.match(card.params.rich_message.html, /<h3>⛸ Ледовая арена/);
+});
+
+test('a chat with notifications switched off gets no alerts at all', async () => {
+  await pressButton(`n:off:${TODAY}:ice_arena`);
+  pageHtml = pageHtml.replace('12.00 – 12.45', '12.00 – 12.45 13.00 – 13.45');
+  telegramCalls.length = 0;
+  const res = await runCheck();
+  assert.ok(res.body.changed >= 1, 'change detected');
+  assert.equal(res.body.notifications, 0);
+  assert.ok(!telegramCalls.some(call => call.method === 'sendRichMessage'), 'nothing is sent');
+});
+
+test('/start opens the card on the only facility the chat is subscribed to', async () => {
+  redis.set('polessu:schedule:dashboard:77', JSON.stringify({ messageId: 5, facilities: ['sports_pool'] }));
   telegramCalls.length = 0;
   const res = makeRes();
   await telegramHandler({
     method: 'POST',
     url: '/api/telegram',
     headers: { 'x-telegram-bot-api-secret-token': process.env.TELEGRAM_WEBHOOK_SECRET },
-    body: { callback_query: { id: 'cb1', data: 'ack', message: { chat: { id: 42 }, message_id: 777 } } },
+    body: { message: { text: '/start', chat: { id: 77 } } },
   }, res);
   assert.equal(res.statusCode, 200);
-  const deleted = telegramCalls.find(call => call.method === 'deleteMessage');
-  assert.deepEqual(deleted.params, { chat_id: 42, message_id: 777 });
-  assert.ok(telegramCalls.find(call => call.method === 'answerCallbackQuery'), 'callback is answered');
+  const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
+  assert.match(sent.params.rich_message.html, /<h3>🏊 Большой бассейн/);
+  assert.equal(JSON.parse(redis.get('polessu:schedule:dashboard:77')).view, 'sports_pool');
 });
 
-test('site changes also refresh the already sent morning digest', async () => {
-  const today = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Europe/Minsk', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date());
-  redis.set('polessu:schedule:digest-date', today);
-  redis.set('polessu:schedule:digest:42', '555');
-
-  pageHtml = pageHtml.replace('21.00 – 21.45', '21.00 – 21.45 22.00 – 22.45');
+test('buttons from an older card version explain what to do instead of failing', async () => {
   telegramCalls.length = 0;
-  const res = makeRes();
-  await checkChangesHandler({ method: 'POST', headers: { authorization: `Bearer ${process.env.CHANGE_CHECK_SECRET}` } }, res);
-  assert.equal(res.statusCode, 200);
-  assert.ok(res.body.changed >= 1, 'change detected');
-  assert.equal(res.body.digests, 0, 'no new digest is sent');
-  assert.equal(res.body.digestsRefreshed, 1, 'existing digest is edited');
-  const edited = telegramCalls.find(call => call.method === 'editMessageText' && call.params.message_id === 555);
-  assert.match(edited.params.rich_message.html, /Сегодня/);
+  await pressButton(`s:${TODAY}:all`);
+  const answer = telegramCalls.find(call => call.method === 'answerCallbackQuery');
+  assert.match(answer.params.text, /устарела/);
 });

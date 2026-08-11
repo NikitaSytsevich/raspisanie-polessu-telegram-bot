@@ -1,6 +1,6 @@
 const { safeEqual } = require('../lib/auth');
 const { getSchedule } = require('../lib/schedule');
-const { formatDay, navKeyboard } = require('../lib/format');
+const { cardView } = require('../lib/format');
 const { editRichMessage } = require('../lib/telegram');
 const { dashboardStore } = require('../lib/dashboard-store');
 const { refreshDashboards } = require('../lib/daily-refresh');
@@ -15,8 +15,7 @@ module.exports = async (req, res) => {
     const payload = await getSchedule({ force: true });
     const result = await refreshDashboards({
       store: dashboardStore(),
-      html: formatDay(payload, payload.today),
-      replyMarkup: navKeyboard(payload.today, payload.today),
+      render: dashboard => cardView(payload, dashboard),
       edit: editRichMessage,
     });
     return res.status(200).json({ ok: true, date: payload.today, ...result });
