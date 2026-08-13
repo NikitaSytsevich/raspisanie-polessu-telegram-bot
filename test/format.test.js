@@ -61,6 +61,11 @@ test('notification screen shows the current subscription and offers one switch',
   const off = notificationsKeyboard([], '2026-07-12', 'all');
   assert.match(formatNotifications([]), /уведомления выключены/);
   assert.equal(off.inline_keyboard.at(-2)[0].text, '🔔 Включить все');
+
+  // Здесь самые длинные payload'ы бота: два id объекта плюс дата. За 64 байта
+  // Telegram отказывается рисовать клавиатуру целиком.
+  const longest = notificationsKeyboard(null, '2026-07-12', 'rowing_base');
+  for (const row of longest.inline_keyboard) for (const button of row) assert.ok(button.callback_data.length <= 64);
 });
 
 test('toggling every facility back on collapses the subscription to “all”', () => {

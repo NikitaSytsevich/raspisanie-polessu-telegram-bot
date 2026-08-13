@@ -2,7 +2,7 @@ const { safeEqual } = require('../lib/auth');
 const { tgApi, sendRichMessage, editRichMessage, answerCallbackQuery, deleteMessage } = require('../lib/telegram');
 const { getSchedule } = require('../lib/schedule');
 const { formatDay, formatNotifications, navKeyboard, notificationsKeyboard } = require('../lib/format');
-const { ALL_FACILITY_IDS, toggleSubscription } = require('../lib/subscriptions');
+const { ALL_FACILITY_IDS, setSubscription } = require('../lib/subscriptions');
 const { dashboardStore } = require('../lib/dashboard-store');
 
 const FACILITY_IDS = ALL_FACILITY_IDS.join('|');
@@ -14,8 +14,9 @@ const NOTIFY_ACTION_RE = new RegExp(`^n:(menu|all|off|${FACILITY_IDS}):(${DATE})
 async function sendCommand(chatId, command) {
   if (command !== 'start' && command !== 'help') return null;
   const store = dashboardStore();
-  const existing = await store.get(chatId);
-  const payload = await getSchedule();
+  // Запись чата и расписание друг от друга не зависят: последовательные
+  // ожидания складывали бы задержку Redis и сайта на самом частом пути.
+  const [existing, payload] = await Promise.all([store.get(chatId), getSchedule()]);
   // Карточка открывается на том же объекте, что и в прошлый раз. Если объект
   // не выбран, но в уведомлениях отмечен ровно один — открываем сразу на нём:
   // «мой объект» задаётся один раз в настройках и работает на обоих экранах.
@@ -25,27 +26,31 @@ async function sendCommand(chatId, command) {
   // «только у себя» она жива для бота, но невидима для пользователя — и
   // успешное редактирование выглядело бы как молчание в ответ на /start.
   const message = await sendRichMessage(chatId, formatDay(payload, payload.today, selected), navKeyboard(payload.today, payload.today, selected));
-  await store.save(chatId, message.message_id, { view: selected });
+  // Настройки чата переживают пересоздание карточки: подписку передаём как есть,
+  // меняется только объект, на котором карточка открылась.
+  await store.save(chatId, message.message_id, { view: selected, facilities: existing?.facilities ?? null });
   // Удаляем прошлую карточку последней: упади отправка раньше, в чате и в
   // хранилище осталась бы рабочая старая, а не ссылка на удалённое сообщение.
   if (existing) await deleteMessage(chatId, existing.messageId).catch(() => {});
-  const digestMessageId = await store.clearDigest(chatId).catch(() => null);
-  if (digestMessageId) await deleteMessage(chatId, digestMessageId).catch(() => {});
   return message;
 }
 
-async function showNotifications(chatId, messageId, action, date, selected) {
-  const store = dashboardStore();
+async function showNotifications(store, chatId, messageId, action, date, selected) {
   const dashboard = await store.get(chatId);
   if (!dashboard) return 'Карточка не найдена — отправьте /start';
   let subscribed = dashboard.facilities;
   if (action !== 'menu') {
-    if (action === 'all') subscribed = null;
-    else if (action === 'off') subscribed = [];
-    else subscribed = toggleSubscription(subscribed, action);
-    await store.update(chatId, { facilities: subscribed });
+    subscribed = setSubscription(subscribed, action);
+    if (!await store.update(chatId, { facilities: subscribed })) return 'Карточка не найдена — отправьте /start';
   }
-  await editRichMessage(chatId, messageId, formatNotifications(subscribed), notificationsKeyboard(subscribed, date, selected));
+  try {
+    await editRichMessage(chatId, messageId, formatNotifications(subscribed), notificationsKeyboard(subscribed, date, selected));
+  } catch (error) {
+    // Настройка уже сохранена. Промолчать нельзя: пользователь увидит прежние
+    // галочки и переключит объект обратно, отменив то, что на самом деле легло.
+    if (action === 'menu') throw error;
+    return 'Сохранено, но экран не обновился — откройте уведомления заново';
+  }
   return undefined;
 }
 
@@ -64,9 +69,10 @@ async function handleCallback(callback) {
       });
       return;
     }
+    const store = dashboardStore();
     const notifyAction = NOTIFY_ACTION_RE.exec(data);
     if (notifyAction) {
-      toast = await showNotifications(chatId, messageId, notifyAction[1], notifyAction[2], notifyAction[3]);
+      toast = await showNotifications(store, chatId, messageId, notifyAction[1], notifyAction[2], notifyAction[3]);
       return;
     }
     const dayAction = DAY_ACTION_RE.exec(data);
@@ -82,8 +88,11 @@ async function handleCallback(callback) {
     const date = facilityAction ? facilityAction[2] : dayAction[2];
     const selected = facilityAction ? facilityAction[1] : dayAction[3];
     // Выбор объекта запоминаем: фоновые обновления перерисовывают карточку
-    // и без этого возвращали бы её к «Всем объектам».
-    if (facilityAction) await dashboardStore().update(chatId, { view: selected }).catch(() => {});
+    // и без этого возвращали бы её к «Всем объектам». Не сохранилось — говорим
+    // сразу, иначе карточка молча перещёлкнется назад через десять минут.
+    if (facilityAction && !await store.update(chatId, { view: selected }).catch(() => null)) {
+      toast = 'Фильтр не сохранён — фоновое обновление вернёт прежний объект';
+    }
     await editRichMessage(chatId, messageId, formatDay(payload, date, selected), navKeyboard(date, payload.today, selected));
     // Тост подтверждаем только после успешного обновления карточки.
     if (force) toast = 'Расписание обновлено ✓';
