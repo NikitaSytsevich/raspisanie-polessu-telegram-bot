@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const cheerio = require('cheerio');
-const { addDays, getSchedule, sessionsFromInline, sessionsFromTables, sessionsFromWeekdayRanges, todayIso } = require('../lib/schedule');
+const { addDays, getSchedule, sessionsFromInline, sessionsFromTables, sessionsFromWeekdayRanges, stripExcludedSections, todayIso } = require('../lib/schedule');
 
 // Все четыре объекта в этих тестах читают одну и ту же подставную страницу:
 // проверяется поведение разбора, а не разница между сайтами.
@@ -113,3 +113,31 @@ test('a weekly schedule keeps filling the card weeks ahead', async () => {
   // Выходных в этом расписании нет — их бот и не выдумывает.
   assert.equal(base.sessions.some(session => session.weekday === 0 || session.weekday === 6), false);
 });
+
+// Раздел «Обучение плаванию» на странице большого бассейна стоит последним и
+// перечисляет дни недели без дат. Пока он оставался в тексте, весь блок
+// приезжал в последний датированный день: у якоря нет правой границы, кроме
+// следующей даты, — и понедельник получал сеансы вторника, субботы и прочих.
+test('coached lessons do not leak into the last dated day', () => {
+  const page = 'Понедельник 07.09.2026 09.15 – 10.00 (свободно 8 дорожек) 20.15 – 21.00 (свободно 7 дорожек)'
+    + ' Обучение плаванию Мельникова О.В.: Вторник, Четверг 17.30 – 18.15 (дети) 20.30 – 21.15 (взрослые)'
+    + ' Суббота 15.30 – 16.15 (дети) Срок действия абонементов - 6 месяцев со дня приобретения';
+  const sessions = sessionsFromInline(stripExcludedSections(page), '2026-09-07');
+  assert.deepEqual(sessions, [
+    { date: '2026-09-07', start: '09:15', end: '10:00', activity: 'свободно 8 дорожек' },
+    { date: '2026-09-07', start: '20:15', end: '21:00', activity: 'свободно 7 дорожек' },
+  ]);
+});
+
+test('cutting a lessons section keeps the rest of the page intact', () => {
+  // Служебный хвост остаётся на месте: по нему ищется причина простоя объекта.
+  const text = stripExcludedSections('Расписание. Обучение плаванию: Вторник 17.30 – 18.15 (дети). Бассейн закрыт на ремонт.');
+  assert.equal(/обучение/i.test(text), false);
+  assert.match(text, /Бассейн закрыт на ремонт/);
+  // Основное расписание идёт и после раздела обучения, если так свёрстана страница.
+  const between = stripExcludedSections('Обучение плаванию: Вторник 17.30 – 18.15 (дети) Среда 09.09.2026 10.00 – 11.00');
+  assert.deepEqual(sessionsFromInline(between, '2026-09-09'), [
+    { date: '2026-09-09', start: '10:00', end: '11:00', activity: '' },
+  ]);
+});
+
