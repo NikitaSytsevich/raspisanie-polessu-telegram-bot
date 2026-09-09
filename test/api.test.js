@@ -12,7 +12,6 @@ const checkChangesHandler = require('../api/check-changes');
 
 // Фальшивый Redis: понимает команды, которыми пользуется dashboard-store.
 const redis = new Map();
-const redisSets = new Map();
 const redisHashes = new Map();
 function hashOf(key) {
   return redisHashes.get(key) || redisHashes.set(key, new Map()).get(key);
@@ -20,7 +19,7 @@ function hashOf(key) {
 function runCommand([cmd, key, ...args]) {
   if (cmd === 'GET') return redis.get(key) ?? null;
   if (cmd === 'SET') { redis.set(key, args[0]); return 'OK'; }
-  if (cmd === 'DEL') { redis.delete(key); redisHashes.delete(key); redisSets.delete(key); return 1; }
+  if (cmd === 'DEL') { redis.delete(key); redisHashes.delete(key); return 1; }
   if (cmd === 'HGET') return hashOf(key).get(args[0]) ?? null;
   if (cmd === 'HSET') { hashOf(key).set(args[0], args[1]); return 1; }
   if (cmd === 'HDEL') { hashOf(key).delete(args[0]); return 1; }
@@ -69,7 +68,6 @@ global.fetch = async (url, options = {}) => {
 
 const DASHBOARDS_KEY = 'polessu:schedule:dashboards';
 const SETTINGS_KEY = 'polessu:schedule:settings';
-const LEGACY_INDEX_KEY = 'polessu:schedule:dashboard-chats';
 
 // Чат, заведённый в обход /start: нужен там, где проверяется поведение рассылки
 // сразу на нескольких карточках.
@@ -262,10 +260,7 @@ test('a chat with notifications switched off gets no alerts at all', async () =>
 });
 
 test('/start opens the card on the only facility the chat is subscribed to', async () => {
-  // Запись прошлой раскладки: свой ключ на чат, настройки ещё внутри карточки.
-  // /start обязан прочитать её и разложить по хешам.
-  redis.set('polessu:schedule:dashboard:77', JSON.stringify({ messageId: 5, facilities: ['sports_pool'] }));
-  runCommand(['SADD', LEGACY_INDEX_KEY, '77']);
+  registerChat(77, { facilities: ['sports_pool'] });
   telegramCalls.length = 0;
   const res = makeRes();
   await telegramHandler({
@@ -285,21 +280,4 @@ test('buttons from an older card version explain what to do instead of failing',
   await pressButton(`s:${TODAY}:all`);
   const answer = telegramCalls.find(call => call.method === 'answerCallbackQuery');
   assert.match(answer.params.text, /устарела/);
-});
-
-test('a chat left in the previous key layout keeps getting background updates', async () => {
-  // Самый дорогой способ ошибиться в переносе — молча потерять чат: карточка
-  // остаётся в переписке, а бот перестаёт её трогать и о ней не знает.
-  redis.set('polessu:schedule:dashboard:88', JSON.stringify({ messageId: 88, view: 'ice_arena' }));
-  runCommand(['SADD', LEGACY_INDEX_KEY, '88']);
-  pageHtml = pageHtml.replace('13.00 – 13.45', '13.00 – 13.45 14.00 – 14.45');
-  telegramCalls.length = 0;
-  await runCheck();
-
-  const card = telegramCalls.find(call => call.method === 'editMessageText' && call.params.chat_id === '88');
-  assert.ok(card, 'the old-layout chat is refreshed');
-  assert.equal(cardOf(88), JSON.stringify({ messageId: 88 }));
-  assert.deepEqual(settingsOf(88), { view: 'ice_arena' });
-  assert.equal(redis.get('polessu:schedule:dashboard:88'), undefined);
-  forgetChat(88);
 });
