@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["fra1"],
   "functions": {
     "api/telegram.js": { "maxDuration": 15 },
     "api/daily-refresh.js": { "maxDuration": 15 },

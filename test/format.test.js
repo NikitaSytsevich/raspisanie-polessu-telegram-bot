@@ -38,7 +38,25 @@ test('navigation fits three rows and stores only compact callback payloads', () 
     'n:menu:2026-07-12:ice_arena',
     'r:2026-07-12:ice_arena',
   ]);
-  for (const row of keyboard.inline_keyboard) for (const button of row) assert.ok(button.callback_data.length <= 64);
+  for (const row of keyboard.inline_keyboard) {
+    for (const button of row) assert.ok(button.disabled || button.callback_data.length <= 64);
+  }
+});
+
+test('buttons that would redraw the same card come back disabled', () => {
+  const today = navKeyboard('2026-07-12', '2026-07-12', 'ice_arena');
+  // «Сегодня» на сегодняшней дате и выбранный объект нажимать не за чем: Telegram
+  // по выключенной кнопке не пришлёт callback, и лишний editMessageText не уйдёт.
+  assert.deepEqual(today.inline_keyboard[0][1], { text: 'Сегодня', disabled: {} });
+  assert.deepEqual(today.inline_keyboard[1][1], { text: '• ⛸', disabled: {} });
+  // disabled — это тип кнопки: callback_data рядом с ним Telegram не примет.
+  assert.equal(today.inline_keyboard[1][1].callback_data, undefined);
+
+  // На другой дате «Сегодня» снова работает, как и все остальные объекты.
+  const other = navKeyboard('2026-07-13', '2026-07-12', 'ice_arena');
+  assert.equal(other.inline_keyboard[0][1].callback_data, 'd:2026-07-12:ice_arena');
+  assert.equal(other.inline_keyboard[1][0].callback_data, 'f:all:2026-07-13');
+  assert.equal(other.inline_keyboard[1][2].callback_data, 'f:sports_pool:2026-07-13');
 });
 
 test('background refresh keeps the facility the chat is looking at', () => {
@@ -66,6 +84,8 @@ test('notification screen shows the current subscription and offers one switch',
   // Telegram отказывается рисовать клавиатуру целиком.
   const longest = notificationsKeyboard(null, '2026-07-12', 'rowing_base');
   for (const row of longest.inline_keyboard) for (const button of row) assert.ok(button.callback_data.length <= 64);
+  // Клавиатура уведомлений выключенных кнопок не содержит: каждая что-то меняет.
+  assert.ok(longest.inline_keyboard.every(row => row.every(button => !button.disabled)));
 });
 
 test('toggling every facility back on collapses the subscription to “all”', () => {

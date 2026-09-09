@@ -13,10 +13,19 @@ const checkChangesHandler = require('../api/check-changes');
 // Фальшивый Redis: понимает команды, которыми пользуется dashboard-store.
 const redis = new Map();
 const redisSets = new Map();
+const redisHashes = new Map();
+function hashOf(key) {
+  return redisHashes.get(key) || redisHashes.set(key, new Map()).get(key);
+}
 function runCommand([cmd, key, ...args]) {
   if (cmd === 'GET') return redis.get(key) ?? null;
   if (cmd === 'SET') { redis.set(key, args[0]); return 'OK'; }
-  if (cmd === 'DEL') { redis.delete(key); return 1; }
+  if (cmd === 'DEL') { redis.delete(key); redisHashes.delete(key); redisSets.delete(key); return 1; }
+  if (cmd === 'HGET') return hashOf(key).get(args[0]) ?? null;
+  if (cmd === 'HSET') { hashOf(key).set(args[0], args[1]); return 1; }
+  if (cmd === 'HDEL') { hashOf(key).delete(args[0]); return 1; }
+  // Upstash отдаёт HGETALL сырым ответом Redis — плоским списком пар.
+  if (cmd === 'HGETALL') return [...hashOf(key)].flat();
   if (cmd === 'SADD') { (redisSets.get(key) || redisSets.set(key, new Set()).get(key)).add(args[0]); return 1; }
   if (cmd === 'SREM') { redisSets.get(key)?.delete(args[0]); return 1; }
   if (cmd === 'SMEMBERS') return [...(redisSets.get(key) || [])];
@@ -58,24 +67,28 @@ global.fetch = async (url, options = {}) => {
   throw new Error(`fake fetch: unexpected url ${target}`);
 };
 
-const INDEX_KEY = 'polessu:schedule:dashboard-chats';
+const DASHBOARDS_KEY = 'polessu:schedule:dashboards';
+const SETTINGS_KEY = 'polessu:schedule:settings';
+const LEGACY_INDEX_KEY = 'polessu:schedule:dashboard-chats';
 
 // Чат, заведённый в обход /start: нужен там, где проверяется поведение рассылки
 // сразу на нескольких карточках.
 function registerChat(chatId, settings) {
-  redis.set(`polessu:schedule:dashboard:${chatId}`, JSON.stringify({ messageId: Number(chatId) }));
-  redis.set(`polessu:schedule:settings:${chatId}`, JSON.stringify(settings));
-  runCommand(['SADD', INDEX_KEY, String(chatId)]);
+  hashOf(DASHBOARDS_KEY).set(String(chatId), JSON.stringify({ messageId: Number(chatId) }));
+  hashOf(SETTINGS_KEY).set(String(chatId), JSON.stringify(settings));
 }
 
 function forgetChat(chatId) {
-  redis.delete(`polessu:schedule:dashboard:${chatId}`);
-  redis.delete(`polessu:schedule:settings:${chatId}`);
-  runCommand(['SREM', INDEX_KEY, String(chatId)]);
+  hashOf(DASHBOARDS_KEY).delete(String(chatId));
+  hashOf(SETTINGS_KEY).delete(String(chatId));
+}
+
+function cardOf(chatId) {
+  return hashOf(DASHBOARDS_KEY).get(String(chatId));
 }
 
 function settingsOf(chatId) {
-  return JSON.parse(redis.get(`polessu:schedule:settings:${chatId}`));
+  return JSON.parse(hashOf(SETTINGS_KEY).get(String(chatId)));
 }
 
 function makeRes() {
@@ -107,7 +120,7 @@ test('start command creates the dashboard card and stores its id', async () => {
   const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
   assert.ok(sent, 'card message is sent');
   assert.match(sent.params.rich_message.html, /Ледовая арена/);
-  assert.equal(redis.get('polessu:schedule:dashboard:42'), JSON.stringify({ messageId: sent.messageId }));
+  assert.equal(cardOf(42), JSON.stringify({ messageId: sent.messageId }));
 });
 
 test('check-changes requires the secret and reports schedule diffs', async () => {
@@ -136,7 +149,7 @@ test('check-changes requires the secret and reports schedule diffs', async () =>
 });
 
 test('repeated /start recreates the card so it stays visible after history clear', async () => {
-  const previousCardId = JSON.parse(redis.get('polessu:schedule:dashboard:42')).messageId;
+  const previousCardId = JSON.parse(cardOf(42)).messageId;
   telegramCalls.length = 0;
   const res = makeRes();
   await telegramHandler({
@@ -152,7 +165,7 @@ test('repeated /start recreates the card so it stays visible after history clear
   assert.deepEqual(deleted.params, { chat_id: 42, message_id: previousCardId });
   const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
   assert.ok(sent, 'new card is sent instead of editing the invisible one');
-  assert.equal(redis.get('polessu:schedule:dashboard:42'), JSON.stringify({ messageId: sent.messageId }));
+  assert.equal(cardOf(42), JSON.stringify({ messageId: sent.messageId }));
   // Порядок важен: сначала новая карточка, потом удаление старой — иначе
   // сбой отправки оставил бы чат вообще без карточки.
   assert.ok(
@@ -190,7 +203,7 @@ test('ack button deletes the change alert message', async () => {
 
 test('facility button remembers the chosen object for background refreshes', async () => {
   telegramCalls.length = 0;
-  const card = redis.get('polessu:schedule:dashboard:42');
+  const card = cardOf(42);
   await pressButton(`f:ice_arena:${TODAY}`);
   const edited = telegramCalls.find(call => call.method === 'editMessageText');
   assert.match(edited.params.rich_message.html, /<h3>⛸ Ледовая арена/);
@@ -198,7 +211,7 @@ test('facility button remembers the chosen object for background refreshes', asy
   // Настройки живут отдельным ключом и запись карточки не переписывают: значит
   // параллельный /start не может остаться с затёртым messageId, а чат — молча
   // выпасть из фоновых обновлений по «message to edit not found».
-  assert.equal(redis.get('polessu:schedule:dashboard:42'), card);
+  assert.equal(cardOf(42), card);
 });
 
 test('notification screen switches the subscription off and back on per facility', async () => {
@@ -249,9 +262,10 @@ test('a chat with notifications switched off gets no alerts at all', async () =>
 });
 
 test('/start opens the card on the only facility the chat is subscribed to', async () => {
-  // Запись в старом формате: настройки ещё лежат внутри карточки, отдельного
-  // ключа нет — /start обязан их прочитать и разложить по новой раскладке.
+  // Запись прошлой раскладки: свой ключ на чат, настройки ещё внутри карточки.
+  // /start обязан прочитать её и разложить по хешам.
   redis.set('polessu:schedule:dashboard:77', JSON.stringify({ messageId: 5, facilities: ['sports_pool'] }));
+  runCommand(['SADD', LEGACY_INDEX_KEY, '77']);
   telegramCalls.length = 0;
   const res = makeRes();
   await telegramHandler({
@@ -273,19 +287,19 @@ test('buttons from an older card version explain what to do instead of failing',
   assert.match(answer.params.text, /устарела/);
 });
 
-test('the leftover morning digest is cleaned up once by a background check', async () => {
-  redis.delete('polessu:schedule:digest-cleanup');
-  redis.set('polessu:schedule:digest:42', '555');
+test('a chat left in the previous key layout keeps getting background updates', async () => {
+  // Самый дорогой способ ошибиться в переносе — молча потерять чат: карточка
+  // остаётся в переписке, а бот перестаёт её трогать и о ней не знает.
+  redis.set('polessu:schedule:dashboard:88', JSON.stringify({ messageId: 88, view: 'ice_arena' }));
+  runCommand(['SADD', LEGACY_INDEX_KEY, '88']);
+  pageHtml = pageHtml.replace('13.00 – 13.45', '13.00 – 13.45 14.00 – 14.45');
   telegramCalls.length = 0;
-  const first = await runCheck();
-  assert.equal(first.body.digestsCleared, 1);
-  const deleted = telegramCalls.find(call => call.method === 'deleteMessage');
-  assert.deepEqual(deleted.params, { chat_id: '42', message_id: 555 });
-  assert.equal(redis.get('polessu:schedule:digest:42'), undefined);
+  await runCheck();
 
-  // Разовая уборка: следующая проверка по чатам уже не ходит.
-  telegramCalls.length = 0;
-  const second = await runCheck();
-  assert.equal(second.body.digestsCleared, 0);
-  assert.ok(!telegramCalls.some(call => call.method === 'deleteMessage'), 'nothing is deleted twice');
+  const card = telegramCalls.find(call => call.method === 'editMessageText' && call.params.chat_id === '88');
+  assert.ok(card, 'the old-layout chat is refreshed');
+  assert.equal(cardOf(88), JSON.stringify({ messageId: 88 }));
+  assert.deepEqual(settingsOf(88), { view: 'ice_arena' });
+  assert.equal(redis.get('polessu:schedule:dashboard:88'), undefined);
+  forgetChat(88);
 });
