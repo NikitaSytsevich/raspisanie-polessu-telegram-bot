@@ -41,6 +41,7 @@ const PAGE = `<html><body><main>
   Понедельник ${day}.${month}.${year} 10.30 – 11.15 (свободно 3 дорожки) 19.15 – 20.00
 </main></body></html>`;
 let pageHtml = PAGE;
+let siteDown = false;
 
 let messageIdSeq = 100;
 
@@ -61,6 +62,7 @@ global.fetch = async (url, options = {}) => {
     return ok({ ok: true, result: { message_id: messageId } });
   }
   if (target.includes('polessu.by')) {
+    if (siteDown) throw new Error('The operation was aborted due to timeout');
     return { ok: true, status: 200, headers: { get: () => 'text/html; charset=utf-8' }, arrayBuffer: async () => new TextEncoder().encode(pageHtml).buffer };
   }
   throw new Error(`fake fetch: unexpected url ${target}`);
@@ -133,16 +135,27 @@ test('check-changes requires the secret and reports schedule diffs', async () =>
   assert.equal(first.body.ok, true);
   assert.equal(first.body.changed, 0);
 
-  // Сайт публикует новый сеанс: следующая проверка обязана прислать сводку.
+  // Сайт публикует новый сеанс: проверка его замечает и обновляет карточку,
+  // но уведомление выжидает одну проверку.
   pageHtml = PAGE.replace('19.15 – 20.00', '19.15 – 20.00 21.00 – 21.45');
   telegramCalls.length = 0;
   const second = makeRes();
   await checkChangesHandler({ method: 'POST', headers: auth }, second);
   assert.equal(second.statusCode, 200);
   assert.ok(second.body.changed >= 1, 'change detected');
-  assert.equal(second.body.notifications, 1);
+  assert.equal(second.body.pending, true);
+  assert.equal(second.body.notifications, 0);
+  assert.ok(telegramCalls.some(call => call.method === 'editMessageText'), 'the card is refreshed at once');
+
+  // Правка продержалась пять минут — уведомление уходит.
+  telegramCalls.length = 0;
+  const third = makeRes();
+  await checkChangesHandler({ method: 'POST', headers: auth }, third);
+  assert.equal(third.body.notifications, 1);
+  assert.equal(third.body.pending, false);
   const alert = telegramCalls.find(call => call.method === 'sendRichMessage');
-  assert.match(alert.params.rich_message.html, /Расписание обновлено/);
+  assert.match(alert.params.rich_message.html, /Изменения в расписании/);
+  assert.match(alert.params.rich_message.html, /➕ 21:00–21:45/);
   assert.equal(alert.params.reply_markup.inline_keyboard[0][0].callback_data, 'ack');
 });
 
@@ -191,6 +204,13 @@ async function runCheck() {
   return res;
 }
 
+// Уведомление уходит со второй проверки подряд, видящей ту же правку.
+async function runCheckTwice() {
+  await runCheck();
+  telegramCalls.length = 0;
+  return runCheck();
+}
+
 test('ack button deletes the change alert message', async () => {
   telegramCalls.length = 0;
   await pressButton('ack');
@@ -199,13 +219,26 @@ test('ack button deletes the change alert message', async () => {
   assert.ok(telegramCalls.find(call => call.method === 'answerCallbackQuery'), 'callback is answered');
 });
 
-test('facility button remembers the chosen object for background refreshes', async () => {
+test('facility buttons choose several objects and the choice survives refreshes', async () => {
+  telegramCalls.length = 0;
+  await pressButton(`f:3:${TODAY}`);
+  const edited = telegramCalls.find(call => call.method === 'editMessageText');
+  assert.match(edited.params.rich_message.html, /<h3>⛸ 🏊 · /);
+  assert.match(edited.params.rich_message.html, /Ледовая арена/);
+  assert.match(edited.params.rich_message.html, /Большой бассейн/);
+  assert.doesNotMatch(edited.params.rich_message.html, /Гребная база/);
+  assert.deepEqual(settingsOf(42).view, ['ice_arena', 'sports_pool']);
+  const row = edited.params.reply_markup.inline_keyboard[1];
+  assert.deepEqual(row.filter(button => button.style === 'primary').map(button => button.text), ['✓⛸', '✓🏊']);
+});
+
+test('facility button from an older card still picks one object', async () => {
   telegramCalls.length = 0;
   const card = cardOf(42);
   await pressButton(`f:ice_arena:${TODAY}`);
   const edited = telegramCalls.find(call => call.method === 'editMessageText');
   assert.match(edited.params.rich_message.html, /<h3>⛸ Ледовая арена/);
-  assert.equal(settingsOf(42).view, 'ice_arena');
+  assert.deepEqual(settingsOf(42).view, ['ice_arena']);
   // Настройки живут отдельным ключом и запись карточки не переписывают: значит
   // параллельный /start не может остаться с затёртым messageId, а чат — молча
   // выпасть из фоновых обновлений по «message to edit not found».
@@ -214,14 +247,14 @@ test('facility button remembers the chosen object for background refreshes', asy
 
 test('notification screen switches the subscription off and back on per facility', async () => {
   telegramCalls.length = 0;
-  await pressButton(`n:menu:${TODAY}:ice_arena`);
+  await pressButton(`n:menu:${TODAY}:1`);
   const menu = telegramCalls.find(call => call.method === 'editMessageText');
   assert.match(menu.params.rich_message.html, /Уведомления об изменениях/);
-  // Экран открыт поверх карточки: возврат ведёт к тому же объекту и дню.
-  assert.equal(menu.params.reply_markup.inline_keyboard.at(-1)[0].callback_data, `d:${TODAY}:ice_arena`);
+  // Экран открыт поверх карточки: возврат ведёт к тем же объектам и дню.
+  assert.equal(menu.params.reply_markup.inline_keyboard.at(-1)[0].callback_data, `d:${TODAY}:1`);
 
-  await pressButton(`n:off:${TODAY}:ice_arena`);
-  await pressButton(`n:ice_arena:${TODAY}:ice_arena`);
+  await pressButton(`n:off:${TODAY}:1`);
+  await pressButton(`n:ice_arena:${TODAY}:1`);
   assert.deepEqual(settingsOf(42).facilities, ['ice_arena']);
 });
 
@@ -231,8 +264,7 @@ test('each chat gets an alert built from its own subscription', async () => {
   registerChat(55, { facilities: ['sports_pool'] });
   // Фикстура одна на все страницы: правка меняет расписание сразу всех объектов.
   pageHtml = pageHtml.replace('10.30 – 11.15', '10.30 – 11.15 12.00 – 12.45');
-  telegramCalls.length = 0;
-  const res = await runCheck();
+  const res = await runCheckTwice();
   assert.ok(res.body.changed >= 2, 'every facility changed');
   assert.equal(res.body.notifications, 2);
 
@@ -243,17 +275,24 @@ test('each chat gets an alert built from its own subscription', async () => {
   assert.doesNotMatch(ice, /Большой бассейн/);
   assert.match(pool, /Большой бассейн/);
   assert.doesNotMatch(pool, /Ледовая арена/);
-  // Карточка при этом обновляется целиком и остаётся на выбранном объекте.
-  const card = telegramCalls.find(call => call.method === 'editMessageText' && call.params.chat_id === '42');
-  assert.match(card.params.rich_message.html, /<h3>⛸ Ледовая арена/);
   forgetChat(55);
 });
 
-test('a chat with notifications switched off gets no alerts at all', async () => {
-  await pressButton(`n:off:${TODAY}:ice_arena`);
-  pageHtml = pageHtml.replace('12.00 – 12.45', '12.00 – 12.45 13.00 – 13.45');
+test('the card follows a site change at once and keeps its chosen object', async () => {
+  pageHtml = pageHtml.replace('12.00 – 12.45', '12.00 – 12.45 12.50 – 12.55');
   telegramCalls.length = 0;
-  const res = await runCheck();
+  await runCheck();
+  const card = telegramCalls.find(call => call.method === 'editMessageText' && call.params.chat_id === '42');
+  assert.match(card.params.rich_message.html, /<h3>⛸ Ледовая арена/);
+  assert.match(card.params.rich_message.html, /12:50–12:55/);
+  // Ещё одна проверка, чтобы уведомление об этой правке не досталось следующему тесту.
+  await runCheck();
+});
+
+test('a chat with notifications switched off gets no alerts at all', async () => {
+  await pressButton(`n:off:${TODAY}:1`);
+  pageHtml = pageHtml.replace('12.00 – 12.45', '12.00 – 12.45 13.00 – 13.45');
+  const res = await runCheckTwice();
   assert.ok(res.body.changed >= 1, 'change detected');
   assert.equal(res.body.notifications, 0);
   assert.ok(!telegramCalls.some(call => call.method === 'sendRichMessage'), 'nothing is sent');
@@ -272,7 +311,56 @@ test('/start opens the card on the only facility the chat is subscribed to', asy
   assert.equal(res.statusCode, 200);
   const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
   assert.match(sent.params.rich_message.html, /<h3>🏊 Большой бассейн/);
-  assert.deepEqual(settingsOf(77), { view: 'sports_pool', facilities: ['sports_pool'] });
+  assert.deepEqual(settingsOf(77), { view: ['sports_pool'], facilities: ['sports_pool'] });
+  forgetChat(77);
+});
+
+test('/start opens the card on every facility the chat is subscribed to', async () => {
+  registerChat(78, { facilities: ['ice_arena', 'rowing_base'] });
+  telegramCalls.length = 0;
+  const res = makeRes();
+  await telegramHandler({
+    method: 'POST',
+    url: '/api/telegram',
+    headers: { 'x-telegram-bot-api-secret-token': process.env.TELEGRAM_WEBHOOK_SECRET },
+    body: { message: { text: '/start', chat: { id: 78 } } },
+  }, res);
+  const sent = telegramCalls.find(call => call.method === 'sendRichMessage');
+  assert.match(sent.params.rich_message.html, /<h3>⛸ 🚣 · /);
+  forgetChat(78);
+});
+
+test('a site outage neither alerts anyone nor blanks the card', async () => {
+  // Подписываем чат обратно на всё: иначе проверка ничего бы не показала.
+  await pressButton(`n:all:${TODAY}:1`);
+  siteDown = true;
+  telegramCalls.length = 0;
+  const down = await runCheckTwice();
+  assert.equal(down.body.changed, 0);
+  assert.equal(down.body.notifications, 0);
+  // Кнопка в это время показывает последние удачные данные с пометкой.
+  telegramCalls.length = 0;
+  await pressButton(`r:${TODAY}:1`);
+  const card = telegramCalls.find(call => call.method === 'editMessageText');
+  assert.match(card.params.rich_message.html, /10:30–11:15/);
+  assert.match(card.params.rich_message.html, /⚠️ сайт не ответил/);
+
+  // Сайт вернулся с тем же расписанием — это тоже не новость.
+  siteDown = false;
+  telegramCalls.length = 0;
+  const back = await runCheckTwice();
+  assert.equal(back.body.changed, 0);
+  assert.ok(!telegramCalls.some(call => call.method === 'sendRichMessage'), 'nothing is sent');
+});
+
+test('a chat that deleted its card still gets the alerts it subscribed to', async () => {
+  registerChat(66, { facilities: ['ice_arena'] });
+  hashOf(DASHBOARDS_KEY).delete('66');
+  pageHtml = pageHtml.replace('13.00 – 13.45', '13.00 – 13.45 14.00 – 14.45');
+  const res = await runCheckTwice();
+  assert.ok(res.body.notifications >= 1);
+  assert.ok(telegramCalls.some(call => call.method === 'sendRichMessage' && call.params.chat_id === '66'));
+  forgetChat(66);
 });
 
 test('buttons from an older card version explain what to do instead of failing', async () => {

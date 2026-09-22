@@ -12,9 +12,10 @@ module.exports = async (req, res) => {
   if (!secret || !safeEqual(authorization, `Bearer ${secret}`)) return res.status(401).json({ ok: false });
 
   try {
-    const payload = await getSchedule({ force: true });
+    const store = dashboardStore();
+    const payload = await getSchedule({ force: true, store });
     const result = await refreshDashboards({
-      store: dashboardStore(),
+      store,
       render: dashboard => cardView(payload, dashboard),
       edit: editRichMessage,
     });

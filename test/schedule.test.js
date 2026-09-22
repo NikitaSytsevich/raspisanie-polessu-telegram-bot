@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const cheerio = require('cheerio');
-const { addDays, getSchedule, sessionsFromInline, sessionsFromTables, sessionsFromWeekdayRanges, stripExcludedSections, todayIso } = require('../lib/schedule');
+const { addDays, getSchedule, sessionsFromInline, sessionsFromTables, sessionsFromWeekdayRanges, stripExcludedSections, todayIso, withLastGood } = require('../lib/schedule');
 
 // Все четыре объекта в этих тестах читают одну и ту же подставную страницу:
 // проверяется поведение разбора, а не разница между сайтами.
@@ -141,3 +141,68 @@ test('cutting a lessons section keeps the rest of the page intact', () => {
   ]);
 });
 
+
+test('stray spaces around a note do not change the session', () => {
+  // На странице бассейна встречается «(свободно 8 дорожек, без 1 крайней )»:
+  // правка этого пробела не должна уходить в рассылку как изменение.
+  const [session] = sessionsFromInline('Пятница 25.09.2026 09.15 – 10.00 (свободно 8 дорожек, без 1 крайней )', '2026-09-23');
+  assert.equal(session.activity, 'свободно 8 дорожек, без 1 крайней');
+});
+
+test('dates written with a comma or a short year are still anchors', () => {
+  const dates = text => sessionsFromInline(text, '2026-09-23').map(session => session.date);
+  assert.deepEqual(dates('Понедельник, 21.09.2026 10.00 – 11.00'), ['2026-09-21']);
+  assert.deepEqual(dates('Вторник (22.09.26) 10.00 – 11.00'), ['2026-09-22']);
+  // Год, приклеенный к первому сеансу, как на странице ледовой арены.
+  assert.deepEqual(dates('Среда 23.09.202612.00 – 12.45'), ['2026-09-23']);
+  // Без года дата не читается: «Суббота 10.05 – 11.00» — это сеанс, а не 10 мая.
+  assert.deepEqual(sessionsFromWeekdayRanges('Суббота 10.05 – 11.00', '2026-09-23').map(session => session.start), ['10:05']);
+  assert.deepEqual(dates('Суббота 10.05 – 11.00'), []);
+});
+
+test('styles embedded in the article body do not reach the parser', async () => {
+  const [, month, day] = todayIso().split('-');
+  const year = todayIso().slice(0, 4);
+  // Так свёрстаны новые страницы сайта: CSS прямо внутри тела статьи.
+  const html = `<html><body><div class="field-item" property="content:encoded">
+    <style>.slot::before { content: "Понедельник ${day}.${month}.${year} 08.00 – 09.00"; }</style>
+    Понедельник ${day}.${month}.${year} 10.30 – 11.15
+  </div></body></html>`;
+  const payload = await withPage(html, () => getSchedule({ force: true }));
+  const ice = payload.facilities.find(facility => facility.id === 'ice_arena');
+  assert.deepEqual(ice.sessions.map(session => session.start), ['10:30']);
+});
+
+test('a page that failed to load shows its last good read for up to a day', () => {
+  const now = Date.parse('2026-09-23T12:00:00Z');
+  const good = { id: 'ice_arena', name: 'Ледовая арена', status: 'ok', sessions: [{ date: '2026-09-23', start: '21:00', end: '21:45' }], checkedAt: '2026-09-23T11:00:00Z' };
+  const down = { id: 'ice_arena', name: 'Ледовая арена', status: 'unavailable', sessions: [] };
+  const merged = withLastGood({ facilities: [down] }, { facilities: [good] }, now).facilities[0];
+  assert.equal(merged.status, 'ok');
+  assert.equal(merged.stale, true);
+  assert.equal(merged.sessions.length, 1);
+  // Старше суток — честно «данные недоступны».
+  const old = withLastGood({ facilities: [down] }, { facilities: [{ ...good, checkedAt: '2026-09-22T11:00:00Z' }] }, now).facilities[0];
+  assert.equal(old.status, 'unavailable');
+  // Удачное чтение всегда важнее сохранённого.
+  const fresh = { ...good, sessions: [], status: 'closed', notice: 'закрыт' };
+  assert.equal(withLastGood({ facilities: [fresh] }, { facilities: [good] }, now).facilities[0].status, 'closed');
+});
+
+test('buttons take the stored schedule while it is fresh and fall back to the site', async () => {
+  const today = todayIso();
+  const stored = { today, generatedAt: new Date().toISOString(), facilities: [{ id: 'ice_arena', status: 'ok', sessions: [] }] };
+  const saved = [];
+  const store = { getPayload: async () => stored, savePayload: async payload => saved.push(payload) };
+  // Свежий разбор последней проверки: страницы не качаются вовсе.
+  const fromRedis = await withPage('<main>не должно читаться</main>', () => getSchedule({ store }));
+  assert.equal(fromRedis, stored);
+  // «↻ Обновить» идёт на сайт и кладёт результат обратно в Redis.
+  const forced = await withPage('<main>Понедельник- Пятница 18.30-19.30</main>', () => getSchedule({ force: true, store }));
+  assert.equal(forced.facilities.length, 4);
+  assert.deepEqual(saved, [forced]);
+  // Вчерашний разбор не годится, даже если ему пять минут.
+  stored.today = addDays(today, -1);
+  const stale = await withPage('<main>Понедельник- Пятница 18.30-19.30</main>', () => getSchedule({ force: true, store }));
+  assert.equal(stale.today, today);
+});

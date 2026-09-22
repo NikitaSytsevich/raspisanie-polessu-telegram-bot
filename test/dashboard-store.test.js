@@ -48,7 +48,7 @@ test('cards and settings live in two hashes and skip malformed records', async (
   ]);
   // Отдельного индекса больше нет: поля хеша карточек и есть список чатов.
   hashOf(DASHBOARDS_KEY).set('broken', '{"messageId":"bad"}');
-  assert.deepEqual(await store.list(), [{ chatId: '123', messageId: 9, view: 'all', facilities: null }]);
+  assert.deepEqual(await store.list(), [{ chatId: '123', messageId: 9, view: null, facilities: null }]);
 });
 
 test('reading every chat costs the same handful of commands whatever the audience', async () => {
@@ -76,13 +76,15 @@ test('settings survive card recreation and unknown chats are not created by upda
   });
 
   // /start присылает новую карточку — подписка и выбранный объект остаются.
+  // Объект прошлой версии записан строкой — читается он как набор из одного.
   const existing = await store.get(123);
   await store.save(123, 42, existing);
-  assert.deepEqual(await store.get(123), { chatId: '123', messageId: 42, view: 'ice_arena', facilities: ['ice_arena'] });
+  assert.deepEqual(await store.get(123), { chatId: '123', messageId: 42, view: ['ice_arena'], facilities: ['ice_arena'] });
+  assert.equal(hashOf(SETTINGS_KEY).get('123'), '{"view":["ice_arena"],"facilities":["ice_arena"]}');
   // Пустой список — это «уведомления выключены», а не значение по умолчанию.
   await store.update(123, { facilities: [] });
   assert.deepEqual((await store.get(123)).facilities, []);
-  assert.equal(await store.update(999, { view: 'all' }), null);
+  assert.equal(await store.update(999, { view: null }), null);
   // Хеш настроек и хеш карточек не пересекаются: id сообщения не может быть
   // затёрт записью настроек, а значит чат не выпадет из фоновых обновлений.
   assert.ok(sent.every(([cmd, key, , value]) => cmd !== 'HSET' || key !== SETTINGS_KEY || !String(value).includes('messageId')));
@@ -100,6 +102,32 @@ test('facility ids that no longer exist never reach the card', async () => {
   // Иначе кнопки карточки унесли бы «gym» в callback_data, ни одно правило
   // маршрутизации его не приняло бы, и карточка замолчала бы навсегда.
   const dashboard = await store.get(123);
-  assert.equal(dashboard.view, 'all');
+  assert.equal(dashboard.view, null);
   assert.deepEqual(dashboard.facilities, ['ice_arena']);
+});
+
+test('a chat whose card was deleted keeps its subscription', async () => {
+  const { hashOf, store } = fakeRedis({
+    hashes: {
+      [DASHBOARDS_KEY]: { 123: '{"messageId":9}' },
+      [SETTINGS_KEY]: { 123: '{"facilities":["sports_pool"]}' },
+    },
+  });
+
+  // Пользователь удалил карточку, но бота не блокировал: забываем только её id.
+  await store.dropCard(123);
+  assert.equal(hashOf(DASHBOARDS_KEY).has('123'), false);
+  // Чат остаётся в списке — уведомления по подписке ему по-прежнему нужны.
+  assert.deepEqual(await store.list(), [{ chatId: '123', messageId: null, view: null, facilities: ['sports_pool'] }]);
+  // Настройки без карточки тоже меняются: экран уведомлений от неё не зависит.
+  assert.ok(await store.update(123, { facilities: [] }));
+});
+
+test('the parsed schedule is stored whole for the next ten minutes of button presses', async () => {
+  const { stored, store } = fakeRedis();
+  assert.equal(await store.getPayload(), null);
+  const payload = { today: '2026-09-23', generatedAt: '2026-09-23T10:00:00Z', facilities: [] };
+  await store.savePayload(payload);
+  assert.deepEqual(await store.getPayload(), payload);
+  assert.ok(stored.has('polessu:schedule:payload'));
 });

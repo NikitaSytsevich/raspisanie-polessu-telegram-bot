@@ -1,12 +1,14 @@
 const { safeEqual } = require('../lib/auth');
-const { getSchedule } = require('../lib/schedule');
+const { currentTime, getSchedule } = require('../lib/schedule');
 const { ACK_KEYBOARD, cardView } = require('../lib/format');
 const { dashboardStore } = require('../lib/dashboard-store');
-const { refreshDashboards, isRemovedDashboardError, inBatches } = require('../lib/daily-refresh');
-const { SNAPSHOT_VERSION, scheduleSnapshot, diffSchedules, formatChangeAlert } = require('../lib/change-monitor');
+const { refreshDashboards, isChatGoneError, inBatches } = require('../lib/daily-refresh');
+const { planCheck, formatChangeAlert } = require('../lib/change-monitor');
 const { subscribedChanges } = require('../lib/subscriptions');
 const { editRichMessage, sendRichMessage } = require('../lib/telegram');
 
+// Уведомление уходит всем чатам с подпиской на затронутый объект — и тем, кто
+// удалил карточку: подписка от карточки не зависит.
 async function notifyDashboards(store, dashboards, changes) {
   // Текст зависит только от набора объектов, попавших в подписку чата, —
   // собираем разметку по разу на набор, а не на каждый чат.
@@ -21,7 +23,7 @@ async function notifyDashboards(store, dashboards, changes) {
       await sendRichMessage(dashboard.chatId, rendered.get(key), ACK_KEYBOARD);
       sent += 1;
     } catch (error) {
-      if (isRemovedDashboardError(error)) await store.remove(dashboard.chatId);
+      if (isChatGoneError(error)) await store.remove(dashboard.chatId);
       else console.error(`[check-changes] notification ${dashboard.chatId}:`, error.message);
     }
   });
@@ -35,19 +37,16 @@ module.exports = async (req, res) => {
   if (!secret || !safeEqual(authorization, `Bearer ${secret}`)) return res.status(401).json({ ok: false });
 
   try {
-    const payload = await getSchedule({ force: true });
     const store = dashboardStore();
-    const dashboards = await store.list();
-    const next = scheduleSnapshot(payload);
-    const stored = await store.getSnapshot();
-    // Снимок старого формата сравнивать не с чем: молча сохраняем новый.
-    const previous = stored?.version === SNAPSHOT_VERSION ? stored : null;
-    const changes = previous ? diffSchedules(previous, next) : [];
-
-    // Первая проверка нового дня обновляет карточки даже без изменений:
-    // иначе до первого нажатия кнопки они показывают вчерашнюю дату.
-    const dayChanged = !previous || previous.today !== next.today;
-    if (dayChanged || changes.length) {
+    // Свежий разбор заодно ложится в Redis: кнопки следующие десять минут
+    // берут его оттуда, а не качают страницы сами.
+    const [payload, dashboards, stored] = await Promise.all([
+      getSchedule({ force: true, store }),
+      store.list(),
+      store.getSnapshot(),
+    ]);
+    const plan = planCheck(stored, payload, currentTime());
+    if (plan.refresh) {
       await refreshDashboards({
         store,
         dashboards,
@@ -57,11 +56,18 @@ module.exports = async (req, res) => {
     }
     // Карточку обновляем всем, а сообщение об изменениях уходит только тем,
     // кто подписан на затронутый объект.
-    const notifications = changes.length ? await notifyDashboards(store, dashboards, changes) : 0;
+    const notifications = plan.notify.length ? await notifyDashboards(store, dashboards, plan.notify) : 0;
     // Снимок сохраняем только после рассылки: если функция упадёт или упрётся
     // в maxDuration раньше, следующая проверка найдёт те же изменения заново.
-    await store.saveSnapshot(next);
-    return res.status(200).json({ ok: true, baseline: !previous, dayChanged, changed: changes.length, notifications });
+    await store.saveSnapshot(plan.save);
+    return res.status(200).json({
+      ok: true,
+      baseline: plan.baseline,
+      dayChanged: plan.dayChanged,
+      changed: plan.changes.length,
+      pending: Boolean(plan.save.pending),
+      notifications,
+    });
   } catch (error) {
     console.error('[check-changes] failed:', error.message);
     return res.status(500).json({ ok: false, error: error.message });
