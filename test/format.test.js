@@ -145,17 +145,19 @@ test('a facility shown from its last good read says so and when it was read', ()
 test('notification screen shows the current subscription and offers one switch', () => {
   const all = notificationsKeyboard(null, '2026-07-12', null);
   assert.match(formatNotifications(null), /сообщаю обо всех объектах/);
-  assert.equal(all.inline_keyboard[0][0].text, '✅ ⛸ Ледовая арена');
-  assert.equal(all.inline_keyboard.at(-2)[0].text, '🔕 Выключить все');
+  assert.equal(all.inline_keyboard[0][0].text, '🔔 ⛸ Ледовая арена');
+  assert.equal(all.inline_keyboard[0][0].style, 'primary');
+  assert.equal(all.inline_keyboard.at(-2)[0].text, 'Выключить все');
   assert.equal(all.inline_keyboard.at(-1)[0].callback_data, 'd:2026-07-12:0');
 
   const single = notificationsKeyboard(['ice_arena'], '2026-07-12', null);
   assert.match(formatNotifications(['ice_arena']), /Сейчас: ⛸ Ледовая арена\./);
-  assert.equal(single.inline_keyboard[1][0].text, '⬜️ 🏊 Большой бассейн');
+  assert.equal(single.inline_keyboard[1][0].text, '🔕 🏊 Большой бассейн');
+  assert.equal(single.inline_keyboard[1][0].style, undefined);
 
   const off = notificationsKeyboard([], '2026-07-12', null);
   assert.match(formatNotifications([]), /уведомления выключены/);
-  assert.equal(off.inline_keyboard.at(-2)[0].text, '🔔 Включить все');
+  assert.equal(off.inline_keyboard.at(-2)[0].text, 'Включить все');
 
   // Здесь самые длинные payload'ы бота: id объекта, дата и маска. За 64 байта
   // Telegram отказывается рисовать клавиатуру целиком.
