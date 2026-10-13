@@ -154,6 +154,21 @@ test('closing a facility is one line, not a list of every removed session', () =
   assert.doesNotMatch(reopened, /➕/);
 });
 
+test('a new closed day leads its date and explains the removed sessions', () => {
+  const previous = scheduleSnapshot({ today: '2026-10-13', facilities: [facility([session('2026-10-14', '09:15', '10:00')])] });
+  const next = scheduleSnapshot({
+    today: '2026-10-13',
+    facilities: [{ ...facility([]), dayNotes: [{ date: '2026-10-14', note: 'Санитарный день' }] }],
+  });
+  const changes = diffSchedules(previous, next);
+  assert.equal(changes.length, 1);
+  assert.match(formatChangeAlert(changes), /<b>ср 14\.10<\/b><br \/>⛔ Санитарный день<br \/>➖ 09:15–10:00/);
+  assert.match(formatChangeAlert(diffSchedules(next, previous)), /✅ <s>Санитарный день<\/s>/);
+  // Прошедший санитарный день уходит из окна разбора сам — это не отмена.
+  const later = scheduleSnapshot({ today: '2026-10-15', facilities: [facility([])] });
+  assert.deepEqual(diffSchedules(next, later), []);
+});
+
 test('a long list folds into an expandable quote instead of being cut short', () => {
   const previous = scheduleSnapshot({ today: '2026-09-23', facilities: [facility([])] });
   const many = Array.from({ length: 8 }, (_, i) => session('2026-09-24', `${String(9 + i).padStart(2, '0')}:00`, `${String(9 + i).padStart(2, '0')}:45`));

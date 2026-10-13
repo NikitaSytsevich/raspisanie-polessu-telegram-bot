@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const cheerio = require('cheerio');
-const { addDays, getSchedule, sessionsFromInline, sessionsFromTables, sessionsFromWeekdayRanges, stripExcludedSections, todayIso, withLastGood } = require('../lib/schedule');
+const { addDays, dayNotesFromInline, getSchedule, sessionsFromInline, sessionsFromTables, sessionsFromWeekdayRanges, stripExcludedSections, todayIso, withLastGood } = require('../lib/schedule');
 
 // Все четыре объекта в этих тестах читают одну и ту же подставную страницу:
 // проверяется поведение разбора, а не разница между сайтами.
@@ -26,6 +26,26 @@ test('the final session does not absorb unrelated page text', () => {
     { date: '2026-07-13', start: '10:30', end: '11:15', activity: 'свободно 3 дорожки' },
     { date: '2026-07-13', start: '19:15', end: '20:00', activity: '' },
   ]);
+});
+
+// Так страница большого бассейна объявила санитарные дни: дата есть, сеансов
+// нет, вместо них — причина. Без пометки день выглядел бы пробелом в расписании.
+test('a dated day without sessions keeps the reason the page gives for it', () => {
+  const text = 'Вторник 13.10.2026 09.15 – 10.00 (свободно 6 дорожек) Среда 14.10.2026Санитарный день '
+    + 'Четверг 15.10.2026Санитарный день Пятница 16.10.2026 09.15 – 10.00';
+  assert.deepEqual(dayNotesFromInline(text, '2026-10-13'), [
+    { date: '2026-10-14', note: 'Санитарный день' },
+    { date: '2026-10-15', note: 'Санитарный день' },
+  ]);
+  // Санитарный день не съедает сеансы соседних дней.
+  assert.deepEqual(sessionsFromInline(text, '2026-10-13').map(s => s.date), ['2026-10-13', '2026-10-16']);
+});
+
+test('the service text after the last date is not a day note', () => {
+  const text = 'Воскресенье 18.10.2026 Срок действия абонементов - 6 месяцев. Оплатить услуги в кассах';
+  assert.deepEqual(dayNotesFromInline(text, '2026-10-13'), []);
+  const long = `Воскресенье 18.10.2026 ${'очень длинный абзац текста '.repeat(5)}`;
+  assert.deepEqual(dayNotesFromInline(long, '2026-10-13'), []);
 });
 
 test('table headers with short weekday names are recognized', () => {

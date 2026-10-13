@@ -26,6 +26,20 @@ test('day schedule uses compact session lines instead of tables and escapes sour
   assert.match(html, /<footer>Обновлено <tg-time unix="\d+" format="dt">[\d.]+, [\d:]+<\/tg-time><\/footer>/);
 });
 
+test('a day the page closed with a reason shows the reason, not an empty day', () => {
+  const closed = {
+    ...payload,
+    facilities: [{
+      id: 'sports_pool', name: 'Бассейн', sourceUrl: 'https://example.test/pool', status: 'ok',
+      sessions: [], dayNotes: [{ date: '2026-07-12', note: 'Санитарный день' }],
+    }],
+  };
+  const html = formatDay(closed, closed.today);
+  assert.match(html, /Бассейн<\/a><\/b> — ⛔ Санитарный день<\/p>/);
+  assert.doesNotMatch(html, /сеансов на эту дату нет/);
+  assert.match(formatDay(closed, '2026-07-13'), /сеансов на эту дату нет/);
+});
+
 test('facility filter keeps the official source link on the facility name', () => {
   const html = formatDay(payload, payload.today, ['ice_arena']);
   assert.match(html, /<h3>⛸ Арена &amp; зал · /);
